@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+    DailyRoutines.Common（AGPL-3.0）源码内嵌副本
+    来源：https://github.com/Dalamud-DailyRoutines/DailyRoutines.Common
+    内嵌目的：为 FFXIV-AutoBuyer 独立插件提供 ModuleBase / Overlay / CardComponent /
+             RemoteInteraction 抽象等基础设施，避免运行时依赖 DailyRoutines 主程序。
+    裁剪：移除独立插件用不到的 KamiToolKit 节点、通知通道、数据上传与模块动态编译部分。
+-->
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
+
+    <PropertyGroup>
+        <UseWindowsForms>true</UseWindowsForms>
+        <ImplicitUsings>true</ImplicitUsings>
+        <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+        <BaseOutputPath>E:\Code\Output\_lib\DailyRoutines.Common\</BaseOutputPath>
+        <SatelliteResourceLanguages>xxx</SatelliteResourceLanguages>
+        <NoWarn>1701;1702;CS0414;CS8601;CS8602;CS8604;CS8603;IDE1006;IDE0300;MSB3270;MSB324;CS0649;CA2211;CS8509;CS8625;MSB3305;CS8618;CS8600;CS8605;CS8620</NoWarn>
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+        <Optimize>True</Optimize>
+        <LangVersion>preview</LangVersion>
+        <AssemblyName>DailyRoutines.Common</AssemblyName>
+        <RootNamespace>DailyRoutines.Common</RootNamespace>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <Use_DalamudPackager>false</Use_DalamudPackager>
+    </PropertyGroup>
+
+    <!-- 裁剪：以下内容依赖 KamiToolKit 或 DailyRoutines 主程序的动态模块加载能力 -->
+    <ItemGroup>
+        <Compile Remove="KamiToolKit\**" />
+        <Compile Remove="Notification\**" />
+        <Compile Remove="DataUploader\**" />
+        <Compile Remove="Module\Compilers\**" />
+        <Compile Remove="Module\ModuleSearcher.cs" />
+        <Compile Remove="Extensions\TextNodeExtension.cs" />
+        <Compile Remove="Extensions\AtkValueArrayExtension.cs" />
+        <Compile Remove="Info\AtkColors.cs" />
+        <Compile Remove="bin\**" />
+        <Compile Remove="obj\**" />
+        <None Remove="bin\**" />
+        <None Remove="obj\**" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="DailyRoutines.CodeAnalysis" Version="2.6.0" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+        <PackageReference Include="TimeAgo.Core" Version="1.1.0" />
+        <PackageReference Include="TinyPinyin" Version="1.1.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\OmenTools\OmenTools.csproj" />
+    </ItemGroup>
+
+</Project>

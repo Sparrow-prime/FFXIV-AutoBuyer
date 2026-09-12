@@ -1,0 +1,11 @@
+<Solution>
+  <Project Path="FFXIV-AutoBuyer/FFXIV-AutoBuyer.csproj">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="lib/OmenTools/OmenTools.csproj">
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="lib/DailyRoutines.Common/DailyRoutines.Common.csproj">
+    <Platform Project="x64" />
+  </Project>
+</Solution>

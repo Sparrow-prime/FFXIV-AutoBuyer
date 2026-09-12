@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
+
+    <PropertyGroup>
+        <UseWindowsForms>true</UseWindowsForms>
+        <ImplicitUsings>true</ImplicitUsings>
+        <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+        <BaseOutputPath>E:\Code\Output\_lib\OmenTools\</BaseOutputPath>
+        <SatelliteResourceLanguages>xxx</SatelliteResourceLanguages>
+        <!-- 【AutoBuyer 本地改动】在 NoWarn 末尾追加 CS0618：屏蔽上游 OmenTools 中未被本插件使用的
+             代码（AetheryteRecord / TeleportCostCalculator）引用的过时 API 警告，保持构建输出干净。 -->
+        <NoWarn>1701;1702;CS0414;CS8601;CS8602;CS8604;CS8603;IDE1006;IDE0300;MSB3270;MSB324;CS0649;CA2211;CS8509;CS8625;MSB3305;CS8618;CS8600;CS8605;CS8620;CS0618</NoWarn>
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+        <Optimize>True</Optimize>
+        <LangVersion>preview</LangVersion>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <Use_DalamudPackager>false</Use_DalamudPackager>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Remove="bin\**"/>
+        <EmbeddedResource Remove="bin\**"/>
+        <None Remove="bin\**"/>
+        <None Remove=".gitattributes"/>
+        <None Remove=".gitignore"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="AngleSharp" Version="1.8.0" />
+        <PackageReference Include="DailyRoutines.CodeAnalysis" Version="2.6.0" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+        <PackageReference Include="GuerrillaNtp" Version="3.1.0"/>
+        <PackageReference Include="TinyPinyin" Version="1.1.0"/>
+    </ItemGroup>
+</Project>

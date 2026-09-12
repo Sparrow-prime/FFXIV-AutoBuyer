@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <Version>1.0.0.0</Version>
+
+    <!-- 插件清单字段 -->
+    <Author>Sparrow-prime</Author>
+    <Name>AutoBuyer</Name>
+    <Punchline>市场布告板增强：跨服比价、在售列表与按目标数量一键购买。</Punchline>
+    <Description>为最终幻想14国服提供的市场布告板增强插件：跨服价格排行、在售物品列表、NPC 收购价与均价参照，并可按目标持有数量从最低价开始自动购买。</Description>
+    <RepoUrl>https://github.com/Sparrow-prime/FFXIV-AutoBuyer</RepoUrl>
+    <Tags>marketboard;market;universalis;purchase;utility</Tags>
+
+    <!--
+      程序集名即插件内部名：DalamudPackager 的 Manifest.InternalName 恒取 AssemblyName
+      （其源码注释：InternalName "should match the assembly name"），因此内部名 AutoBuyer
+      要求 AssemblyName 同为 AutoBuyer。
+    -->
+    <AssemblyName>AutoBuyer</AssemblyName>
+    <RootNamespace>FFXIVAutoBuyer</RootNamespace>
+    <ApplicableVersion>any</ApplicableVersion>
+
+    <!-- 构建产物统一输出到 E:\Code\Output -->
+    <BaseOutputPath>E:\Code\Output\FFXIV-AutoBuyer\</BaseOutputPath>
+
+    <NoWarn>1701;1702;CS0414;CS8601;CS8602;CS8604;CS8603;IDE1006;IDE0300;MSB3270;MSB324;CS0649;CA2211;CS8509;CS8625;MSB3305;CS8618;CS8600;CS8605;CS8620</NoWarn>
+    <LangVersion>preview</LangVersion>
+
+    <!-- 与 DailyRoutines 工程保持一致：依赖隐式 using（System / System.Collections.Generic / System.Linq / System.Threading.Tasks 等） -->
+    <ImplicitUsings>true</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <SatelliteResourceLanguages>xxx</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\lib\OmenTools\OmenTools.csproj" />
+    <ProjectReference Include="..\lib\DailyRoutines.Common\DailyRoutines.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- CN SDK 设置了 EnableDefaultNoneItems=false，故须显式 Include 才能复制到输出目录 -->
+    <Content Include="Localization\**\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </Content>
+  </ItemGroup>
+
+</Project>

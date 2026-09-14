@@ -390,7 +390,14 @@ public unsafe partial class MarketBoardModule : ModuleBase
         if (worldID == 0)
             return;
 
-        if (worldID == lastWorldID)
+        if (lastWorldID == 0)
+        {
+            // 首次运行：仅记录基线，不做失效处理
+            lastWorldID       = worldID;
+            pendingWorldID    = 0;
+            pendingWorldTicks = 0;
+        }
+        else if (worldID == lastWorldID)
         {
             pendingWorldID    = 0;
             pendingWorldTicks = 0;
@@ -403,6 +410,10 @@ public unsafe partial class MarketBoardModule : ModuleBase
             {
                 pendingWorldID    = worldID;
                 pendingWorldTicks = 1;
+
+                // 首次发现世界变化：立刻作废旧世界数据（不去抖、不发请求），
+                // 避免跨服瞬间把上一服务器的挂牌当作本服数据显示
+                provider.InvalidateWorldData($"检测到世界变化 {lastWorldID} → {worldID}");
             }
 
             if (pendingWorldTicks >= WORLD_RESYNC_CONFIRM_TICKS &&

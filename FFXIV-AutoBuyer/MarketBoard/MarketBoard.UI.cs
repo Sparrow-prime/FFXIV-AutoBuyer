@@ -27,9 +27,22 @@ public unsafe partial class MarketBoardModule
     /// <summary>已跟随过的游戏侧物品（物品 ID → 最近跟随时刻），用于抑制抖动循环。</summary>
     private readonly Dictionary<uint, long> adoptedGameItems = [];
 
+    /// <summary>跟随游戏侧物品的待确认项（用于过滤搜索过渡期的瞬时读数）。</summary>
+    private uint pendingGameItemID;
+    private long pendingGameItemSince;
+
     private long lastGameItemAdoptTick;
 
     /// <summary>跟随游戏物品的最小间隔与同一物品的跟随冷却。</summary>
+    /// <summary>
+    /// 玩家主动选择物品后的保护期：期间一律不跟随游戏侧物品
+    /// （我们自己发起的搜索可能被节流跳过，此时游戏侧仍是上一个物品）。
+    /// </summary>
+    private const long SYNC_ITEM_GUARD_MS = 6_000;
+
+    /// <summary>需要连续观察到同一个「不同物品」这么久，才认为确实切了物品。</summary>
+    private const long SYNC_ITEM_CONFIRM_MS = 1_500;
+
     private const long GAME_ITEM_ADOPT_MIN_INTERVAL_MS = 3_000;
     private const long GAME_ITEM_ADOPT_COOLDOWN_MS     = 30_000;
 
@@ -188,15 +201,37 @@ public unsafe partial class MarketBoardModule
                               0u :
                               infoProxy->SearchItemId;
 
-        if (proxyItemID == 0 || proxyItemID == provider.SelectedItemID) return;
+        if (proxyItemID == 0 || proxyItemID == provider.SelectedItemID)
+        {
+            pendingGameItemID = 0;
+            return;
+        }
 
         var now = Environment.TickCount64;
 
-        if (now - provider.LastSelectTime < GAME_ITEM_ADOPT_MIN_INTERVAL_MS)
+        if (now - provider.LastSelectTime < SYNC_ITEM_GUARD_MS)
         {
-            MarketDataProvider.DiagLog($"跟随游戏物品被跳过（我们刚选过）game={proxyItemID}");
+            MarketDataProvider.DiagLog($"跟随游戏物品被跳过（选择保护期内）game={proxyItemID}");
             return;
         }
+
+        // 我方所选物品的搜索还没完成（请求被节流/在途等待跳过）：
+        // 此时游戏侧仍是上一个物品，跟随会导致「跳回原来的物品」
+        if (provider.IsLocalListingsStale)
+        {
+            MarketDataProvider.DiagLog($"跟随游戏物品被跳过（我方搜索未完成）game={proxyItemID}");
+            return;
+        }
+
+        // 需要连续观察到同一个「不同物品」才采用，避免搜索过渡期的瞬时读数
+        if (proxyItemID != pendingGameItemID)
+        {
+            pendingGameItemID    = proxyItemID;
+            pendingGameItemSince = now;
+            return;
+        }
+
+        if (now - pendingGameItemSince < SYNC_ITEM_CONFIRM_MS) return;
 
         if (now - lastGameItemAdoptTick < GAME_ITEM_ADOPT_MIN_INTERVAL_MS) return;
 
@@ -210,6 +245,7 @@ public unsafe partial class MarketBoardModule
 
         adoptedGameItems[proxyItemID] = now;
         lastGameItemAdoptTick         = now;
+        pendingGameItemID             = 0;
 
         MarketDataProvider.DiagLog($"跟随游戏侧物品 game={proxyItemID}（我方={provider.SelectedItemID}）");
 

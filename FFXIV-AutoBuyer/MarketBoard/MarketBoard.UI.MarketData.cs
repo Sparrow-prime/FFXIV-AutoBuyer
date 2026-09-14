@@ -70,8 +70,10 @@ public unsafe partial class MarketBoardModule
             }
         }
 
-        // 持有数量 / 目标数量 / 购买按钮：与物品名同一行、贴右边缘
+        // 持有数量 / 目标数量 / 购买按钮：与物品名同一行、贴右边缘。
+        // 下移少许，使其在「物品名」所在行内垂直居中（视觉上像同一行）
         ImGui.SameLine();
+        ImGui.SetCursorPosY(origin.Y + MathF.Max(0f, (nameBandHeight - ImGui.GetFrameHeight()) / 2f));
         DrawPurchaseControls(frame);
 
         // 第二行：收藏 / HQ / 刷新（与物品名左对齐，位于图标右侧）
@@ -129,6 +131,16 @@ public unsafe partial class MarketBoardModule
                 provider.Reload();
 
             ImGuiOm.TooltipHover(Lang.Get("BetterMarketBoard-ReloadMarketData"));
+
+            // 「仅显示当前大区数据」勾选框与「展开全部世界价格」箭头：紧随刷新按钮之后（同行）
+            ImGui.SameLine();
+
+            DrawAllWorldPricesToggleComponent
+            (
+                isAllWorldsPriceExpanded ?
+                    ImGuiDir.Up :
+                    ImGuiDir.Down
+            );
         }
 
         // 光标推进到图标下方，避免后续（价格卡片等）与图标/两行控件重叠

@@ -91,6 +91,12 @@ public unsafe partial class MarketBoardModule
         public bool IsViewingCurrentWorld =>
             SelectedWorldID == GameState.CurrentWorld;
 
+        /// <summary>
+        /// 我方是否仍在等待「当前所选物品」的本地搜索完成。
+        /// 为真时游戏侧 <c>SearchItemId</c> 可能仍是上一个物品，界面不应跟随游戏侧物品。
+        /// </summary>
+        public bool IsLocalListingsStale => localListingsStale;
+
         public WorldPriceRow MinPriceData { get; private set; }
 
         public WorldPriceRow MaxPriceData { get; private set; }
@@ -121,6 +127,19 @@ public unsafe partial class MarketBoardModule
 
         private readonly Dictionary<string, List<WorldPriceRow>> cachedDCWorldPrices = [];
         private          WorldPriceRanks?                        worldPriceRanks;
+
+        /// <summary>当前价格表对应的物品 ID（用于切换物品时立即作废旧数据）。</summary>
+        private uint priceTableItemID;
+
+        /// <summary>
+        /// 跨服后是否已确认「游戏侧数据属于新世界」。
+        /// 仅在观察到「列表被清空 → 重新到齐」的完整循环后才置为 true，
+        /// 避免把上一服务器的残留挂牌当作新服务器数据（并污染服务器最低价缓存）。
+        /// </summary>
+        private bool worldDataRefreshed = true;
+
+        /// <summary>跨服后是否已观察到「列表未就绪」的状态（确认清空已生效）。</summary>
+        private bool worldDataNotReadySeen;
         private          string?                                 priceTableRegion;
         private          bool                                    priceTableHQOnly;
         private          bool                                    priceTableOnlyCurrentDC;
@@ -143,10 +162,21 @@ public unsafe partial class MarketBoardModule
         /// 首次等待 3 秒、后续间隔 5 秒、总窗口 12 秒。
         /// 参数刻意保守：游戏市场列表本身刷新较慢，频繁补拉会表现成「持续刷新」。
         /// </summary>
-        private const int  LOCAL_SEARCH_RETRY_MAX_ATTEMPTS  = 1;
-        private const long LOCAL_SEARCH_RETRY_FIRST_DELAY_MS = 3_000;
-        private const long LOCAL_SEARCH_RETRY_INTERVAL_MS    = 5_000;
-        private const long LOCAL_SEARCH_RETRY_TOTAL_MS       = 15_000;
+        // 补拉（单次获取 + 失败重试）策略。
+        // 注意：跨服后玩家需要重新走到市场布告板，IsAbleToSearchMarket() 才会为真，
+        // 因此总窗口只在「可以搜索」的时间段内消耗（不可搜索 / 服务器拒绝时自动续期），
+        // 否则窗口会在玩家还没走到布告板前就过期，导致一直取不到数据。
+        /// <summary>允许的自动补拉次数（每次仅请求 1 个物品）。</summary>
+        private const int LOCAL_SEARCH_RETRY_MAX_ATTEMPTS = 4;
+
+        /// <summary>首次补拉延迟：避开跨服落地瞬间（此时游戏侧尚不能搜索）。</summary>
+        private const long LOCAL_SEARCH_RETRY_FIRST_DELAY_MS = 5_000;
+
+        /// <summary>两次补拉之间的间隔。</summary>
+        private const long LOCAL_SEARCH_RETRY_INTERVAL_MS = 10_000;
+
+        /// <summary>补拉总窗口（仅在可搜索时计时）。</summary>
+        private const long LOCAL_SEARCH_RETRY_TOTAL_MS = 60_000;
 
         /// <summary>隐式刷新进行中：请求新数据但继续显示当前列表。</summary>
         private bool pendingImplicitRefresh;
@@ -402,6 +432,81 @@ public unsafe partial class MarketBoardModule
             AnchorRegion();
         }
 
+        /// <summary>
+        /// 游戏侧市场数据在当前世界是否可用。
+        /// 跨服后必须先观察到「清空 → 重新到齐」的完整循环：游戏侧在跨服瞬间仍持有
+        /// 上一服务器的挂牌，若直接采用会把旧服务器价格显示（并缓存）成本服数据。
+        /// </summary>
+        private bool IsGameMarketDataUsable
+        (
+            uint itemID
+        )
+        {
+            if (InfoProxy == null || !IsAbleToSearchLocalMarket() || InfoProxy->SearchItemId != itemID)
+                return false;
+
+            var isReady = InfoProxy->IsFullyReceived();
+
+            if (!worldDataRefreshed)
+            {
+                if (!isReady)
+                {
+                    // 清空已生效：等待重新到齐
+                    worldDataNotReadySeen = true;
+                    return false;
+                }
+
+                if (!worldDataNotReadySeen)
+                {
+                    DiagLog($"忽略疑似旧世界残留的游戏数据 item={itemID}");
+                    return false;
+                }
+
+                worldDataRefreshed = true;
+                DiagLog($"新世界的游戏侧数据已就绪 item={itemID}");
+            }
+
+            return isReady;
+        }
+
+        /// <summary>
+        /// 检测到跨服 / 世界切换时**立刻**作废旧世界的全部显示数据（不发起任何请求）。
+        /// 与 <see cref="ResyncAfterWorldChange"/> 的区别：本方法在发现世界变化的当帧即执行，
+        /// 不去抖等待；世界重同步仍按原节奏处理（用于锚定世界目录与补拉标记）。
+        /// </summary>
+        public void InvalidateWorldData
+        (
+            string reason
+        )
+        {
+            worldDataRefreshed    = false;
+            worldDataNotReadySeen = false;
+
+            SelectedWorldID = GameState.CurrentWorld;
+
+            var info = InfoProxy;
+
+            if (info != null)
+                info->ClearListData();
+
+            cachedDCWorldPrices.Clear();
+            worldPriceRanks          = null;
+            MinPriceData             = default;
+            MaxPriceData             = default;
+            worldPriceTableDirty     = true;
+            localListingsData        = null;
+            localListingsFingerprint = default;
+            localListingsBaseline    = default;
+            localSearchRetryAttempts = 0;
+
+            // 交给补拉机制在新世界重新搜索（窗口未打开时不会发起任何请求）
+            localListingsStale       = true;
+            localSearchRetryDeadline = Environment.TickCount64 + LOCAL_SEARCH_RETRY_TOTAL_MS;
+            localSearchNextRetryTick = Environment.TickCount64 + LOCAL_SEARCH_RETRY_FIRST_DELAY_MS;
+
+            DiagLog($"跨服/世界切换：已作废旧世界数据（{reason}）");
+        }
+
         public void ResyncAfterWorldChange()
         {
             DiagLog($"世界重同步 world={GameState.CurrentWorld} item={SelectedItemID}");
@@ -409,15 +514,20 @@ public unsafe partial class MarketBoardModule
             SelectedWorldID     = GameState.CurrentWorld;
             EffectiveRegionName = UniversalisApi.ChinaRegionName;
 
-            var info = InfoProxy;
-            if (info != null)
-                info->ClearListData();
+            // 世界数据已在「发现世界变化」的当帧由 InvalidateWorldData 作废并标记补拉；
+            // 此处仅在尚未作废（兜底路径）时清理，避免把刚取到的新世界数据再清一次、白跑一次请求。
+            if (worldDataRefreshed)
+            {
+                var info = InfoProxy;
+                if (info != null)
+                    info->ClearListData();
 
-            ClearAllData();
+                ClearAllData();
 
-            // 跨服后不再立即发起游戏搜索（减少与游戏服务器通信），
-            // 仅标记待补拉：若布告板窗口开着，稍后由补拉机制补 1 次；窗口关着则完全不请求。
-            MarkLocalListingsStale(info, "世界重同步");
+                // 跨服后不再立即发起游戏搜索（减少与游戏服务器通信），
+                // 仅标记待补拉：若布告板窗口开着，稍后由补拉机制补 1 次；窗口关着则完全不请求。
+                MarkLocalListingsStale(info, "世界重同步");
+            }
         }
 
         /// <summary>让卡片区的世界价格表在下次绘制时重建（世界目录变化后调用）。</summary>
@@ -522,15 +632,28 @@ public unsafe partial class MarketBoardModule
 
             var now = Environment.TickCount64;
 
+            // 尚不能搜索（跨服途中 / 布告板未打开）：窗口自动续期，等待玩家真正能搜索的时刻
+            if (!IsAbleToSearchMarket())
+            {
+                localSearchRetryDeadline = now + LOCAL_SEARCH_RETRY_TOTAL_MS;
+                return;
+            }
+
+            // 服务器正在拒绝请求：不消耗窗口与尝试次数，等冷却结束再补
+            if (GameState.Instance().IsMarketListingsStuck)
+            {
+                localSearchRetryDeadline = now + LOCAL_SEARCH_RETRY_TOTAL_MS;
+                return;
+            }
+
             if (now > localSearchRetryDeadline)
             {
+                DiagLog($"补拉窗口结束（未取到数据）item={SelectedItemID} 尝试={localSearchRetryAttempts}");
                 localListingsStale = false;
                 return;
             }
 
-            if (now < localSearchNextRetryTick)             return;
-            if (!IsAbleToSearchMarket())                    return;
-            if (GameState.Instance().IsMarketListingsStuck) return;
+            if (now < localSearchNextRetryTick) return;
 
             // 重获取次数用尽 → 放弃（等待玩家手动切物品/刷新）
             if (localSearchRetryAttempts >= LOCAL_SEARCH_RETRY_MAX_ATTEMPTS)
@@ -890,10 +1013,7 @@ public unsafe partial class MarketBoardModule
 
             // 本服在售列表可直接从游戏读取时，无需再向 Universalis 请求同一世界的挂牌数据
             var localDataAvailable = SelectedWorldID == GameState.CurrentWorld &&
-                                     IsAbleToSearchLocalMarket()                 &&
-                                     InfoProxy               != null              &&
-                                     InfoProxy->SearchItemId == itemID            &&
-                                     InfoProxy->IsFullyReceived(itemID);
+                                     IsGameMarketDataUsable(itemID);
 
             if (!localDataAvailable)
             {
@@ -1128,8 +1248,22 @@ public unsafe partial class MarketBoardModule
                 localSearchRetryAttempts = 0;
             }
 
-            if (!info->IsFullyReceived())
+            if (!IsGameMarketDataUsable(info->SearchItemId))
             {
+                // 跨服过渡期（含「新旧世界无法确认」）：一律不显示，避免显示上一服务器数据
+                if (!worldDataRefreshed)
+                {
+                    DiagLog($"跨服过渡：本地列表暂不显示 item={info->SearchItemId}");
+                    return EmptyLocalListings();
+                }
+
+                // 同世界内的隐式刷新：新数据成功获取前沿用上一次完整数据，不隐藏列表
+                if (localListingsData != null)
+                {
+                    DiagLog($"本地列表暂未接收完整，沿用上一次数据 item={info->SearchItemId}");
+                    return localListingsData;
+                }
+
                 DiagLog($"本地列表为空返回（游戏数据未接收完）item={info->SearchItemId} 条目={info->EntryCount}/{info->ListingCount}");
                 return EmptyLocalListings();
             }
@@ -1248,8 +1382,24 @@ public unsafe partial class MarketBoardModule
                 return null;
             }
 
-            var stateChanged = priceTableRegion        != regionName              ||
-                               priceTableHQOnly        != HQOnly                  ||
+            // 切换物品：立刻作废旧数据，避免卡片短暂显示上一物品的价格
+            var itemChanged = priceTableItemID != itemID;
+
+            if (itemChanged)
+            {
+                DiagLog($"切换物品 → 清空世界价格数据 item={itemID}");
+
+                priceTableItemID     = itemID;
+                cachedDCWorldPrices.Clear();
+                worldPriceRanks      = null;
+                MinPriceData         = default;
+                MaxPriceData         = default;
+                worldPriceTableDirty = true;
+            }
+
+            var stateChanged = itemChanged                                          ||
+                               priceTableRegion        != regionName                ||
+                               priceTableHQOnly        != HQOnly                    ||
                                priceTableOnlyCurrentDC != owner.config.OnlyCurrentDC ||
                                (InfoProxy != null && InfoProxy->EntryCount > 0 && cachedDCWorldPrices.Count == 0);
             // 注意：Throttler 默认仅 500ms，而跨服/启动时 28 个世界的最低价会陆续到达，
@@ -1275,11 +1425,7 @@ public unsafe partial class MarketBoardModule
                         var minPrice = ulong.MaxValue;
 
                         // 1) 当前世界：服务器实时数据（游戏内市场列表）
-                        if (worldID == GameState.CurrentWorld   &&
-                            IsAbleToSearchLocalMarket()         &&
-                            InfoProxy                     != null &&
-                            InfoProxy->SearchItemId       == itemID &&
-                            InfoProxy->IsFullyReceived(itemID))
+                        if (worldID == GameState.CurrentWorld && IsGameMarketDataUsable(itemID))
                         {
                             var listings = InfoProxy->Listings.ToArray()
                                                               .Where
@@ -1483,11 +1629,7 @@ public unsafe partial class MarketBoardModule
             bool hqOnly
         )
         {
-            if (SelectedWorldID == GameState.CurrentWorld &&
-                IsAbleToSearchLocalMarket()                         &&
-                InfoProxy != null                                      &&
-                InfoProxy->SearchItemId == itemID                    &&
-                InfoProxy->IsFullyReceived(itemID))
+            if (SelectedWorldID == GameState.CurrentWorld && IsGameMarketDataUsable(itemID))
             {
                 var localMinPrice = InfoProxy->Listings.ToArray()
                                                    .Where

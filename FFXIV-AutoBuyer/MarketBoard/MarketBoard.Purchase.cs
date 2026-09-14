@@ -1,3 +1,4 @@
+using FFXIVClientStructs.FFXIV.Client.Game;
 using System.Numerics;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using OmenTools.Interop.Game.Lumina;
@@ -18,7 +19,20 @@ public unsafe partial class MarketBoardModule
     private static readonly Vector4 PurchaseButtonActiveColor  = new(0.36f, 0.19f, 0.05f, 1f);
     private static readonly Vector4 PurchaseButtonTextColor    = new(1.00f, 0.86f, 0.62f, 1f);
 
-    private const long PURCHASE_WAIT_MS = 5_000;
+    /// <summary>需要检查空位的玩家背包（避免发出注定失败的购买请求）。</summary>
+    private static readonly InventoryType[] PlayerInventoryTypes =
+    [
+        InventoryType.Inventory1,
+        InventoryType.Inventory2,
+        InventoryType.Inventory3,
+        InventoryType.Inventory4
+    ];
+
+    /// <summary>目标数量输入框宽度（按需求：原 90 的一半）。</summary>
+    private const float PurchaseTargetInputWidth = 45f;
+
+    /// <summary>等待单次购买生效的最长时间（毫秒）：缩短以便失败时尽快反馈。</summary>
+    private const long PURCHASE_WAIT_MS = 2_500;
 
     /// <summary>两次购买请求之间的间隔，留给游戏处理与列表刷新，避免连续下单。</summary>
     private const long PURCHASE_COOLDOWN_MS = 350;
@@ -75,7 +89,7 @@ public unsafe partial class MarketBoardModule
             // 目标数量输入框
             var target = (int)Math.Min(config.PurchaseQuantity, int.MaxValue);
 
-            ImGui.SetNextItemWidth(90f * GlobalUIScale);
+            ImGui.SetNextItemWidth(PurchaseTargetInputWidth);
 
             if (ImGui.InputInt("###PurchaseTarget", ref target, 0, 0))
             {
@@ -143,7 +157,7 @@ public unsafe partial class MarketBoardModule
         var style = ImGui.GetStyle();
 
         var heldWidth   = ImGui.CalcTextSize($"{Lang.Get("BetterMarketBoard-Purchase-Held")} {heldCount}").X;
-        var inputWidth  = 90f * GlobalUIScale;
+        var inputWidth  = PurchaseTargetInputWidth;
         var buttonWidth = ImGui.CalcTextSize(GetPurchaseButtonLabel()).X + (style.FramePadding.X * 2);
 
         return heldWidth + inputWidth + buttonWidth + (style.ItemSpacing.X * 2);
@@ -249,7 +263,12 @@ public unsafe partial class MarketBoardModule
             }
 
             if (Environment.TickCount64 - purchaseWaitStart > PURCHASE_WAIT_MS)
-                FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"));
+                FinishPurchase
+                (
+                    PlayerInventoryTypes.IsFull() ?
+                        Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull") :
+                        Lang.Get("BetterMarketBoard-Purchase-Timeout")
+                );
 
             return !isPurchasing;
         }
@@ -258,7 +277,14 @@ public unsafe partial class MarketBoardModule
         if (Environment.TickCount64 < purchaseCooldownUntil)
             return false;
 
-        // 3) 取当前服务器在售列表中价格最低的第一条（列表已按单价升序）
+        // 3) 背包已满 → 立即停止（不发出版本注定失败的请求，玩家立刻看到提示）
+        if (PlayerInventoryTypes.IsFull())
+        {
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"));
+            return true;
+        }
+
+        // 4) 取当前服务器在售列表中价格最低的第一条（列表已按单价升序）
         var firstListing = FindCheapestListing(info, purchaseItemID);
 
         if (firstListing == null)

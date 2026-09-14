@@ -273,9 +273,12 @@ public unsafe partial class MarketBoardModule
         var isSelected = provider.SelectedItemID == item.RowId;
         var isFavorite = config.FavoriteItems.ContainsKey(item.RowId);
 
-        var availWidth  = ImGui.GetContentRegionAvail().X;
-        var rowHeight   = (ImGui.GetTextLineHeight() * 1.6f) + (6f * GlobalUIScale);
-        var actionAreaW = 18f * GlobalUIScale;
+        var availWidth = ImGui.GetContentRegionAvail().X;
+
+        // 卡片高度：容纳「物品名 + 品级」两行文字，并给右上角收藏按钮留出空间
+        // （字号档位上调后原高度不足以容纳，出现收藏/品级上下出界）
+        var rowHeight   = (ImGui.GetTextLineHeight() * 2f) + (10f * GlobalUIScale);
+        var actionAreaW = 20f * GlobalUIScale;
         var padX        = 4f  * GlobalUIScale;
         var mainButtonW = availWidth - actionAreaW - (4f * GlobalUIScale);
         var cardSize    = new Vector2(availWidth, rowHeight);

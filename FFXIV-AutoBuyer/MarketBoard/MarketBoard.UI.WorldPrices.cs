@@ -22,13 +22,6 @@ public partial class MarketBoardModule
         var ranks             = provider.GetWorldPriceRanks(frame.ItemID);
         var displayRegionName = provider.EffectiveRegionName;
 
-        DrawAllWorldPricesToggleComponent
-        (
-            isAllWorldsPriceExpanded ?
-                ImGuiDir.Up :
-                ImGuiDir.Down
-        );
-
         if (ranks == null || ranks.Valid.Count == 0)
         {
             if (frame.ItemID != 0 && !string.IsNullOrEmpty(displayRegionName))
@@ -634,24 +627,9 @@ public partial class MarketBoardModule
     {
         using var font = UIFont(0.8f).Push();
 
-        // 需求：原「数据中心选择下拉框」改为「仅显示当前大区数据」勾选框，
-        // 位置不变 —— 与标题区「跳转/刷新」同排、靠右对齐、紧贴展开箭头左侧。
+        // 需求：原「数据中心选择下拉框」改为「仅显示当前大区数据」勾选框；
+        // 位置紧随标题区「刷新市场数据」按钮之后（同一行、就地绘制）。
         var checkboxLabel = Lang.Get("BetterMarketBoard-OnlyCurrentDC");
-        var checkboxWidth = ImGui.CalcTextSize(checkboxLabel).X +
-                            ImGui.GetFrameHeight()           +
-                            ImGui.GetStyle().ItemInnerSpacing.X;
-
-        var cursorPos = ImGui.GetCursorPos();
-        var componentPos = new Vector2
-        (
-            ImGui.GetWindowContentRegionMax().X -
-            ImGui.GetFrameHeight()              -
-            checkboxWidth                       -
-            (2 * ImGui.GetStyle().ItemSpacing.X),
-            cursorPos.Y - ImGui.GetFrameHeight() - ImGui.GetStyle().FramePadding.Y
-        );
-
-        ImGui.SetCursorPos(componentPos);
 
         using (ImRaii.Group())
         {
@@ -673,8 +651,6 @@ public partial class MarketBoardModule
                 )
             );
         }
-
-        ImGui.SetCursorPos(cursorPos);
     }
 
     private void DrawFullPriceTable

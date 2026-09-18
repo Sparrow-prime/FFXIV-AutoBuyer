@@ -30,14 +30,14 @@ public partial class MarketBoardModule
         if (itemID == 0                                         ||
             !LuminaGetter.TryGetRow<Item>(itemID, out var item) ||
             item.ItemSearchCategory.RowId == 0                  ||
-            GameState.CurrentWorld        == 0)
+            CurrentWorldID        == 0)
             return;
 
         var hqOnly            = kind is ItemKind.Hq && item.CanBeHq;
         var currentRegionName = GetCurrentRegionName();
-        var currentWorldName  = LuminaWrapper.GetWorldName(GameState.CurrentWorld);
+        var currentWorldName  = LuminaWrapper.GetWorldName(CurrentWorldID);
         var currentWorldScope = string.IsNullOrEmpty(currentWorldName) ?
-                                    GameState.CurrentWorld.ToString() :
+                                    CurrentWorldID.ToString() :
                                     currentWorldName;
         var requestTargets = string.IsNullOrEmpty(currentRegionName) ?
                                  [currentWorldScope] :
@@ -106,7 +106,7 @@ public partial class MarketBoardModule
                .Append($"    {Lang.Get("BetterMarketBoard-Tooltip-CurrentWorld")}")
                .Append(" (")
                .AppendIcon((uint)BitmapFontIcon.CrossWorld)
-               .Append($"{GameState.CurrentWorldData.Name}")
+               .Append($"{LuminaWrapper.GetWorldName(CurrentWorldID)}")
                .Append(")");
 
         builder.Append(": ")

@@ -19,27 +19,81 @@ public unsafe partial class MarketBoardModule
     private static readonly Vector4 PurchaseButtonActiveColor  = new(0.36f, 0.19f, 0.05f, 1f);
     private static readonly Vector4 PurchaseButtonTextColor    = new(1.00f, 0.86f, 0.62f, 1f);
 
-    /// <summary>需要检查空位的玩家背包（避免发出注定失败的购买请求）。</summary>
+    /// <summary>
+    /// 是否**确实**无法收到该物品（用于避免发出注定失败的购买请求）。
+    /// 不复用 OmenTools 的 <c>IsFull()</c>：容器未加载或 manager 为空时它会返回 true，
+    /// 跨服 / 过场后必然误报「背包已满或无法继续购买」；同时本判定允许与已有同类堆叠。
+    /// 判定不出来（容器未加载）时一律视为「可以收到」，宁可让游戏去拒绝。
+    /// </summary>
+    private static bool IsUnableToReceiveItem(uint itemID)
+    {
+        var manager = InventoryManager.Instance();
+        if (manager == null || itemID == 0) return false;
+
+        var anyContainerLoaded = false;
+        var hasSameItemSlot    = false;
+        var loadedContainers   = new List<string>();
+
+        foreach (var type in PlayerInventoryTypes)
+        {
+            var container = manager->GetInventoryContainer(type);
+            if (container == null || !container->IsLoaded) continue;
+
+            anyContainerLoaded = true;
+            loadedContainers.Add(type.ToString());
+
+            for (var index = 0; index < container->Size; index++)
+            {
+                var slot = container->GetInventorySlot(index);
+                if (slot == null) continue;
+
+                // 有空位 → 一定收得下
+                if (slot->ItemId == 0) return false;
+
+                // 身上已有同类物品 → 可能堆叠成功，不阻断
+                if (slot->ItemId == itemID) hasSameItemSlot = true;
+            }
+        }
+
+        // 只有「读到了容器、既无空位也无同类」才判定为收不下
+        var isUnable = anyContainerLoaded && !hasSameItemSlot;
+
+        if (isUnable)
+            MarketDataProvider.DiagLog($"判定收不下 item={itemID} 已读容器=[{string.Join(",", loadedContainers)}]");
+
+        return isUnable;
+    }
+
+    /// <summary>
+    /// 需要检查空位的玩家容器。
+    /// 注意必须包含 <see cref="InventoryType.Crystals"/>：水晶 / 碎晶 / 晶簇存放在
+    /// 水晶专用背包，若只检查 4 个主背包，主背包满 + 主背包内无同类时会误判「收不下」。
+    /// </summary>
     private static readonly InventoryType[] PlayerInventoryTypes =
     [
         InventoryType.Inventory1,
         InventoryType.Inventory2,
         InventoryType.Inventory3,
-        InventoryType.Inventory4
+        InventoryType.Inventory4,
+        InventoryType.Crystals
     ];
 
     /// <summary>目标数量输入框宽度（按需求：原 90 的一半）。</summary>
     private const float PurchaseTargetInputWidth = 45f;
 
+    /// <summary>
+    /// 点击购买后，若游戏侧在售数据尚未就绪（跨服过渡 / 正在重新搜索），
+    /// 最多等待这么久；期间会主动请求一次刷新，数据一到立即开买。
+    /// </summary>
+    private const long PURCHASE_DATA_WAIT_MS = 8_000;
+
     /// <summary>等待单次购买生效的最长时间（毫秒）：缩短以便失败时尽快反馈。</summary>
-    private const long PURCHASE_WAIT_MS = 2_500;
+    private const long PURCHASE_WAIT_MS = 4_000;
 
     /// <summary>两次购买请求之间的间隔，留给游戏处理与列表刷新，避免连续下单。</summary>
     private const long PURCHASE_COOLDOWN_MS = 350;
 
     /// <summary>隐式刷新的最小间隔：避免购买过程中反复重新搜索导致列表持续刷新。</summary>
-    private const long IMPLICIT_REFRESH_MIN_INTERVAL_MS = 2_000;
-
     /// <summary>单个购买任务的最大购买次数，避免异常情况下无限循环。</summary>
     private const int PURCHASE_MAX_ATTEMPTS = 500;
 
@@ -49,8 +103,8 @@ public unsafe partial class MarketBoardModule
     private uint purchaseHeldBefore;
     private int  purchaseAttempts;
     private long purchaseWaitStart;
+    private long purchaseDataWaitStart;
     private long purchaseCooldownUntil;
-    private long lastImplicitRefreshTick;
     private ulong purchaseWaitingListingID;
 
     /// <summary>
@@ -107,7 +161,8 @@ public unsafe partial class MarketBoardModule
 
             ImGui.SameLine();
 
-            // 购买按钮：底色由「纯亮橙」改为「暗橙」，并显式指定文字颜色，避免刺眼且看不清
+            // 购买按钮：底色由「纯亮橙」改为「暗橙」，并显式指定文字颜色，避免刺眼且看不清。
+            // 不做「数据未就绪就置灰」的限制：随时可点，数据未到齐时购买流程会等待数据（见 PurchaseStep）
             var canPurchase = !isPurchasing;
 
             using (ImRaii.Disabled(!canPurchase))
@@ -185,13 +240,15 @@ public unsafe partial class MarketBoardModule
         }
 
         isPurchasing             = true;
+        provider.AutoSearchSuppressed = true;   // 购买期间禁止一切自动搜索
+
         purchaseItemID           = itemID;
         purchaseTarget           = targetQuantity;
         purchaseHeldBefore       = LocalPlayerState.GetItemCount(itemID);
         purchaseAttempts         = 0;
         purchaseWaitStart        = 0;
+        purchaseDataWaitStart    = 0;
         purchaseCooldownUntil    = 0;
-        lastImplicitRefreshTick  = 0;
         purchaseWaitingListingID = 0;
 
         var helper = TaskHelper;
@@ -205,22 +262,6 @@ public unsafe partial class MarketBoardModule
         helper.Enqueue(PurchaseStep, "市场布告板-按目标数量购买", 300_000, weight: 10);
     }
 
-    /// <summary>
-    /// 隐式刷新（限流）：两次调用间隔小于 <see cref="IMPLICIT_REFRESH_MIN_INTERVAL_MS"/> 时跳过，
-    /// 避免购买流程高频触发市场搜索请求，导致游戏列表持续刷新。
-    /// </summary>
-    private void TryImplicitRefresh()
-    {
-        var now = Environment.TickCount64;
-
-        if (now - lastImplicitRefreshTick < IMPLICIT_REFRESH_MIN_INTERVAL_MS)
-            return;
-
-        lastImplicitRefreshTick = now;
-
-        provider.BeginImplicitRefresh(purchaseItemID);
-    }
-
     /// <summary>购买任务主体；返回 false 表示下一帧继续。</summary>
     private bool PurchaseStep()
     {
@@ -229,7 +270,44 @@ public unsafe partial class MarketBoardModule
 
         var info = InfoProxy;
 
-        if (info == null || !IsPurchaseAvailable(purchaseItemID))
+        if (info == null)
+        {
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-NeedLocalWorld"));
+            return true;
+        }
+
+        // 0) 游戏侧完全没有这个物品的数据（跨服过渡 / 还没搜索过）：
+        //    不直接判失败，而是等待数据 —— 并主动请求一次刷新，数据一到立刻开买。
+        //    注意：**不要**把「IsFullyReceived 为假」也算作未就绪 —— 购买成功后游戏侧
+        //    会短暂进入该状态（它自己在更新列表），若在此触发刷新，就会表现为
+        //    「购买后又刷新了一遍列表」。
+        if (info->SearchItemId != purchaseItemID)
+        {
+            var nowWaiting = Environment.TickCount64;
+
+            if (purchaseDataWaitStart == 0)
+            {
+                purchaseDataWaitStart = nowWaiting;
+
+                MarketDataProvider.DiagLog($"购买等待数据 item={purchaseItemID}");
+
+                provider.RequestRefreshOnce("购买等待数据");
+
+                NotifyHelper.Instance().NotificationInfo(Lang.Get("BetterMarketBoard-Purchase-WaitWorldData"));
+            }
+
+            if (nowWaiting - purchaseDataWaitStart <= PURCHASE_DATA_WAIT_MS)
+                return false;
+
+            MarketDataProvider.DiagLog($"购买等待数据超时 item={purchaseItemID}");
+
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-WaitWorldData"));
+            return true;
+        }
+
+        purchaseDataWaitStart = 0;
+
+        if (!IsPurchaseAvailable(purchaseItemID))
         {
             FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-NeedLocalWorld"));
             return true;
@@ -251,11 +329,15 @@ public unsafe partial class MarketBoardModule
 
             if (heldCount > purchaseHeldBefore || listingGone)
             {
+                // 该挂单已被买走/买完：立即从显示列表移除（游戏侧数据刷新前也能看到效果）
+                var purchasedListingID = purchaseWaitingListingID;
+
                 purchaseWaitStart        = 0;
                 purchaseWaitingListingID = 0;
 
-                // 隐式刷新：不隐藏当前列表；限流调用，避免连续重新搜索导致列表持续刷新
-                TryImplicitRefresh();
+                // 保守策略（用户选择）：购买后**不**自动刷新列表，
+                // 仅本地移除已购挂单；数据只在「打开窗口 / 手动刷新」时获取。
+                provider.MarkListingPurchased(purchasedListingID);
 
                 // 两次下单之间留出冷却时间，让游戏处理购买并更新列表
                 purchaseCooldownUntil = Environment.TickCount64 + PURCHASE_COOLDOWN_MS;
@@ -265,7 +347,7 @@ public unsafe partial class MarketBoardModule
             if (Environment.TickCount64 - purchaseWaitStart > PURCHASE_WAIT_MS)
                 FinishPurchase
                 (
-                    PlayerInventoryTypes.IsFull() ?
+                    IsUnableToReceiveItem(purchaseItemID) ?
                         Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull") :
                         Lang.Get("BetterMarketBoard-Purchase-Timeout")
                 );
@@ -277,8 +359,8 @@ public unsafe partial class MarketBoardModule
         if (Environment.TickCount64 < purchaseCooldownUntil)
             return false;
 
-        // 3) 背包已满 → 立即停止（不发出版本注定失败的请求，玩家立刻看到提示）
-        if (PlayerInventoryTypes.IsFull())
+        // 3) 确实收不下 → 立即停止（不发出版本注定失败的请求，玩家立刻看到提示）
+        if (IsUnableToReceiveItem(purchaseItemID))
         {
             FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"));
             return true;
@@ -304,7 +386,11 @@ public unsafe partial class MarketBoardModule
         purchaseWaitStart        = Environment.TickCount64;
 
         if (!MarketDataProvider.SendBuyRequest(firstListing.Value))
-            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"));
+        {
+            // 游戏侧拒绝下发（多为该挂单已售出/不可购买）：
+            // 结束本次购买，但**不**把它计入「已购」——挂单可能仍在售，隐藏会误导
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-NoListing"));
+        }
 
         return !isPurchasing;
     }
@@ -317,9 +403,10 @@ public unsafe partial class MarketBoardModule
     {
         var wasPurchasing = isPurchasing;
 
-        isPurchasing             = false;
-        purchaseWaitStart        = 0;
-        purchaseWaitingListingID = 0;
+        isPurchasing                  = false;
+        provider.AutoSearchSuppressed = false;   // 恢复自动搜索
+        purchaseWaitStart             = 0;
+        purchaseWaitingListingID      = 0;
 
         if (!wasPurchasing || purchaseItemID == 0)
             return;
@@ -352,11 +439,11 @@ public unsafe partial class MarketBoardModule
     (
         uint itemID
     ) =>
-        itemID != 0                     &&
-        InfoProxy != null               &&
-        IsAbleToSearchMarket()          &&
+        itemID != 0                       &&
+        InfoProxy != null                 &&
+        IsAbleToSearchLocalMarket()            &&
         provider.SelectedItemID == itemID &&
-        provider.SelectedWorldID == GameState.CurrentWorld;
+        provider.SelectedWorldID == CurrentWorldID;
 
     private static bool IsListingStillThere
     (
@@ -387,6 +474,10 @@ public unsafe partial class MarketBoardModule
                 continue;
 
             if (IsOwnRetainer(listing.RetainerId))
+                continue;
+
+            // 已买走的挂单（游戏侧列表可能尚未刷新）：跳过，避免重复下单
+            if (MarketDataProvider.IsListingPurchased(listing.ListingId))
                 continue;
 
             if (result == null || listing.UnitPrice < result.Value.UnitPrice)

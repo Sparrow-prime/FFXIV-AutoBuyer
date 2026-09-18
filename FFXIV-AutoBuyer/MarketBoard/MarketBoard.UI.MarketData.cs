@@ -173,10 +173,10 @@ public unsafe partial class MarketBoardModule
         {
             if (frame.IsViewingCurrentWorld)
             {
-                if (frame.IsLocalMarketSearchable)
-                    DrawLocalMarketDataTable(frame, info);
-                else if (provider.GetListingsDataSet(frame.ItemID) is { } onlineOne)
-                    DrawOnlineMarketDataTable(frame, onlineOne);
+                // 本服：只显示游戏内实时数据。
+                // 不再用 Universalis 兜底 —— 那些数据不能购买、价格不准，
+                // 还会在购买/跨服期间短暂接管列表，看起来像「列表被刷新」。
+                DrawLocalMarketDataTable(frame, info);
             }
             else if (provider.GetListingsDataSet(frame.ItemID) is { } onlineTwo)
                 DrawOnlineMarketDataTable(frame, onlineTwo);
@@ -192,19 +192,16 @@ public unsafe partial class MarketBoardModule
         var dataset       = provider.GetLocalListingsDataSet(info);
         var listingsArray = dataset.Listings;
 
-        if (provider.IsImplicitRefreshPending)
+        if (provider.IsImplicitRefreshPending || listingsArray.Count == 0)
             ImGui.TextDisabled($"{FontAwesomeIcon.Sync.ToIconString()} {Lang.Get("BetterMarketBoard-Purchase-Refreshing")}");
 
         var isAnyHQ              = dataset.IsAnyHQ;
-        var isAnyOnMannequin     = dataset.IsAnyOnMannequin;
         var isAnyMateriaEquipped = dataset.IsAnyMateria;
 
         var columnsCount = 4;
         if (isAnyHQ)
             columnsCount++;
         if (isAnyMateriaEquipped)
-            columnsCount++;
-        if (isAnyOnMannequin)
             columnsCount++;
 
         using var table = ImRaii.Table
@@ -221,9 +218,6 @@ public unsafe partial class MarketBoardModule
             var materiaText = LuminaWrapper.GetAddonText(1937);
             ImGui.TableSetupColumn(materiaText, ImGuiTableColumnFlags.WidthFixed, ImGui.CalcTextSize(materiaText).X);
         }
-
-        if (isAnyOnMannequin)
-            ImGui.TableSetupColumn(Lang.Get("Mannequin"), ImGuiTableColumnFlags.WidthFixed, ImGui.CalcTextSize(Lang.Get("Mannequin")).X);
 
         // 数据列四列平分（单价 / 数量 / 总价 / 雇员）
         ImGui.TableSetupColumn(LuminaWrapper.GetAddonText(357),  ImGuiTableColumnFlags.WidthStretch, 1f);
@@ -243,12 +237,6 @@ public unsafe partial class MarketBoardModule
         {
             ImGui.TableNextColumn();
             ImGui.TextUnformatted(LuminaWrapper.GetAddonText(1937));
-        }
-
-        if (isAnyOnMannequin)
-        {
-            ImGui.TableNextColumn();
-            ImGui.TextUnformatted(Lang.Get("Mannequin"));
         }
 
         ImGui.TableNextColumn();
@@ -304,17 +292,6 @@ public unsafe partial class MarketBoardModule
                 ImGui.TextUnformatted($"{listing.MateriaCount}");
             }
 
-            if (isAnyOnMannequin)
-            {
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted
-                (
-                    listing.IsMannequin ?
-                        "\u221a" :
-                        string.Empty
-                );
-            }
-
             ImGui.TableNextColumn();
             DrawMarketPrice(listing.UnitPrice);
 
@@ -359,7 +336,14 @@ public unsafe partial class MarketBoardModule
             }
 
             ImGui.TableNextColumn();
-            var retainerName = AtkStage.Instance()->GetStringArrayData(StringArrayType.ItemSearch)->StringArray[208 + (6 * counter)];
+
+            // 雇员名来自游戏字符串数组，只能按行号取；已购行被本地隐藏后渲染行号会前移，
+            // 必须用该挂单在游戏侧顺序中的原始行号，否则雇员名整列会错位（「只有雇员列在上移」）
+            var sourceRowIndex = dataset.SourceRowIndexes.TryGetValue(listing.ListingId, out var rowIndex) ?
+                                     rowIndex :
+                                     counter;
+
+            var retainerName = AtkStage.Instance()->GetStringArrayData(StringArrayType.ItemSearch)->StringArray[208 + (6 * sourceRowIndex)];
             if (retainerName.HasValue)
                 ImGui.TextUnformatted($"{retainerName.ToString()}");
         }
@@ -380,16 +364,13 @@ public unsafe partial class MarketBoardModule
         ListingsDataSet      dataset
     )
     {
-        var isAnyHQ          = dataset.IsAnyHQ;
-        var isAnyOnMannequin = dataset.IsAnyOnMannequin;
+        var isAnyHQ = dataset.IsAnyHQ;
 
         // 列数 = 4 个数据列（单价 / 数量 / 总价 / 雇员） + 可选标记列。
-        // 注意：必须用「+」而不是「-」——此前移植时沿用了原模块（基准 6 含两个可选列）的减法写法，
-        // 导致既无 HQ 也无模特条目时列数变成 2，四列内容被折成 2×2（查看其他服务器时可见）。
+        // 注意：必须用「+」而不是「-」——此前移植时沿用了原模块的减法写法，
+        // 导致无 HQ 条目时列数算错，四列内容被折成 2×2（查看其他服务器时可见）。
         var columnsCount = 4;
         if (isAnyHQ)
-            columnsCount++;
-        if (isAnyOnMannequin)
             columnsCount++;
 
         using var table = ImRaii.Table
@@ -400,9 +381,6 @@ public unsafe partial class MarketBoardModule
 
         if (isAnyHQ)
             ImGui.TableSetupColumn("\ue03c", ImGuiTableColumnFlags.WidthFixed, ImGui.CalcTextSize("\ue03c").X);
-
-        if (isAnyOnMannequin)
-            ImGui.TableSetupColumn(Lang.Get("Mannequin"), ImGuiTableColumnFlags.WidthFixed, ImGui.CalcTextSize(Lang.Get("Mannequin")).X);
 
         // 数据列四列平分（单价 / 数量 / 总价 / 雇员）
         ImGui.TableSetupColumn(LuminaWrapper.GetAddonText(357),  ImGuiTableColumnFlags.WidthStretch, 1f);
@@ -434,17 +412,6 @@ public unsafe partial class MarketBoardModule
                 ImGui.TextUnformatted
                 (
                     listing.HQ ?
-                        "√" :
-                        string.Empty
-                );
-            }
-
-            if (isAnyOnMannequin)
-            {
-                ImGui.TableNextColumn();
-                ImGui.TextUnformatted
-                (
-                    listing.OnMannequin ?
                         "√" :
                         string.Empty
                 );

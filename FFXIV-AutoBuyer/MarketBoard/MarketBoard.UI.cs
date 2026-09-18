@@ -38,10 +38,10 @@ public unsafe partial class MarketBoardModule
     /// 玩家主动选择物品后的保护期：期间一律不跟随游戏侧物品
     /// （我们自己发起的搜索可能被节流跳过，此时游戏侧仍是上一个物品）。
     /// </summary>
-    private const long SYNC_ITEM_GUARD_MS = 6_000;
+    private const long SYNC_ITEM_GUARD_MS = 4_000;
 
     /// <summary>需要连续观察到同一个「不同物品」这么久，才认为确实切了物品。</summary>
-    private const long SYNC_ITEM_CONFIRM_MS = 1_500;
+    private const long SYNC_ITEM_CONFIRM_MS = 1_200;
 
     private const long GAME_ITEM_ADOPT_MIN_INTERVAL_MS = 3_000;
     private const long GAME_ITEM_ADOPT_COOLDOWN_MS     = 30_000;
@@ -177,7 +177,7 @@ public unsafe partial class MarketBoardModule
             hasItem,
             itemData,
             npcGilPrice,
-            GameState.CurrentWorld,
+            CurrentWorldID,
             provider.SelectedWorldID,
             provider.HQOnly,
             IsAbleToSearchLocalMarket()

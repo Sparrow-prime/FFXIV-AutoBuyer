@@ -5,6 +5,7 @@ using FFXIVAutoBuyer.Universalis;
 using Dalamud.Interface.ManagedFontAtlas;
 using Dalamud.Plugin.Ipc;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
+using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using Lumina.Excel.Sheets;
 using OmenTools.Dalamud.Attributes;
 using OmenTools.Interop.Game.Lumina;
@@ -44,7 +45,18 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
     private readonly Dictionary<uint, List<Item>> searchCategoryToItems = [];
 
-    private uint lastWorldID;
+    /// <summary>
+    /// 本插件认定的「玩家当前所在世界」。
+    /// 加载时只从大厅数据取一次；跨界传送后由游戏日志
+    /// 「使用跨界传送移动到了xxx。」权威更新（该行只在**落地后**出现）。
+    /// <para>
+    /// 为什么不直接用 <c>GameState.CurrentWorld</c>：它取自大厅数据（LobbyData），
+    /// 会在过场开始时就变化、也可能根本不随跨界传送变化 —— 一旦与真实世界不一致，
+    /// 检测不会触发、世界锚点也会写错，表现为「一直显示上一服务器的数据」。
+    /// 因此全插件（数据层 / 购买 / 卡片高亮 / Tooltip / UI 帧）的「当前世界」判定统一以此为准。
+    /// </para>
+    /// </summary>
+    private static uint CurrentWorldID { get; set; }
 
     /// <summary>上一帧布告板窗口是否打开（用于「刚打开时补一次」）。</summary>
     private bool wasOverlayOpen;
@@ -57,14 +69,8 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
     private ICallGateSubscriber<bool>? lifestreamIsBusy;
 
-    /// <summary>世界切换去抖：连续读到的候选世界与其计数。</summary>
-    private uint pendingWorldID;
-    private int  pendingWorldTicks;
-    private long lastWorldResyncTick;
-
-    /// <summary>确认世界切换所需的连续读取次数（每秒一次）与两次重同步的最小间隔。</summary>
-    private const int  WORLD_RESYNC_CONFIRM_TICKS     = 2;
-    private const long WORLD_RESYNC_MIN_INTERVAL_MS   = 5_000;
+    /// <summary>跨界传送日志行的固定文案前缀（除服务器名外无任何变体）。</summary>
+    private const string WORLD_VISIT_LOG_PREFIX = "使用跨界传送移动到了";
 
     protected override void Init()
     {
@@ -104,8 +110,11 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
         provider = new(this);
 
+        // 世界锚点：加载时只从大厅数据取一次，之后由跨界传送日志权威更新
+        CurrentWorldID = GameState.CurrentWorld;
         provider.AnchorWorld();
-        lastWorldID = GameState.CurrentWorld;
+
+        BuildWorldVisitLogMessageIDs();
 
         searcher = new
         (
@@ -148,7 +157,7 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
         CommandManager.Instance().AddCommand(COMMAND, new(OnCommand) { HelpMessage = Lang.Get("BetterMarketBoard-CommandHelp") });
 
-        if (IsAbleToSearchMarket()                                              &&
+        if (IsAbleToSearchLocalMarket()                                              &&
             InfoProxy               != null                                     &&
             InfoProxy->SearchItemId != 0                                        &&
             LuminaGetter.TryGetRow<Item>(InfoProxy->SearchItemId, out var data) &&
@@ -161,6 +170,9 @@ public unsafe partial class MarketBoardModule : ModuleBase
         }
 
         FrameworkManager.Instance().Reg(OnWorldWatch, 1_000);
+
+        // 跨界传送判定：游戏日志「使用跨界传送移动到了xxx。」（仅在插件窗口打开时监测）
+        LogMessageManager.Instance().RegPost(OnWorldVisitLogMessage);
 
         GameState.Instance().MarketListingsStuck += OnMarketListingsStuck;
 
@@ -175,6 +187,7 @@ public unsafe partial class MarketBoardModule : ModuleBase
     {
         TooltipManager.Instance().Unreg(OnItemTooltipUpdate);
         FrameworkManager.Instance().Unreg(OnWorldWatch);
+        LogMessageManager.Instance().Unreg(OnWorldVisitLogMessage);
 
         GameState.Instance().MarketListingsStuck -= OnMarketListingsStuck;
         CommandManager.Instance().RemoveCommand(COMMAND);
@@ -229,7 +242,7 @@ public unsafe partial class MarketBoardModule : ModuleBase
         string worldName
     )
     {
-        if (worldID == 0 || worldID == GameState.CurrentWorld)
+        if (worldID == 0 || worldID == CurrentWorldID)
             return;
 
         var displayName = string.IsNullOrEmpty(worldName) ?
@@ -371,69 +384,34 @@ public unsafe partial class MarketBoardModule : ModuleBase
         provider.NotifyMarketRequestRejected();
 
     /// <summary>
-    /// 每秒检查世界是否变化。
-    /// 过场/跨服过程中 <see cref="GameState.CurrentWorld"/> 会出现抖动（例如短暂读到 0 或反复跳变），
-    /// 若每跳变一次就重同步，会连续触发 <c>ClearListData + 重新搜索</c>，表现为「跨服后持续刷新」。
-    /// 因此这里要求：忽略 0；同一个新世界连续 2 次读到才确认切换；且两次重同步之间至少间隔
-    /// <see cref="WORLD_RESYNC_MIN_INTERVAL_MS"/>。
+    /// 每秒一次的窗口/数据节奏维护。
+    /// <para>
+    /// 世界变化的判定**不在**这里：改为监听游戏日志「使用跨界传送移动到了xxx。」
+    /// （见 <see cref="OnWorldVisitLogMessage"/>），该行只在落地后出现，
+    /// 因此命中即可当帧处理，无需任何去抖/延迟等待。
+    /// </para>
     /// </summary>
     private void OnWorldWatch
     (
         IFramework framework
     )
     {
-        if (!IsAbleToSearchMarket())
+        if (!IsAbleToSearchLocalMarket())
             return;
-
-        var worldID = GameState.CurrentWorld;
-
-        if (worldID == 0)
-            return;
-
-        if (lastWorldID == 0)
-        {
-            // 首次运行：仅记录基线，不做失效处理
-            lastWorldID       = worldID;
-            pendingWorldID    = 0;
-            pendingWorldTicks = 0;
-        }
-        else if (worldID == lastWorldID)
-        {
-            pendingWorldID    = 0;
-            pendingWorldTicks = 0;
-        }
-        else
-        {
-            if (worldID == pendingWorldID)
-                pendingWorldTicks++;
-            else
-            {
-                pendingWorldID    = worldID;
-                pendingWorldTicks = 1;
-
-                // 首次发现世界变化：立刻作废旧世界数据（不去抖、不发请求），
-                // 避免跨服瞬间把上一服务器的挂牌当作本服数据显示
-                provider.InvalidateWorldData($"检测到世界变化 {lastWorldID} → {worldID}");
-            }
-
-            if (pendingWorldTicks >= WORLD_RESYNC_CONFIRM_TICKS &&
-                Environment.TickCount64 - lastWorldResyncTick >= WORLD_RESYNC_MIN_INTERVAL_MS)
-            {
-                lastWorldID          = worldID;
-                lastWorldResyncTick  = Environment.TickCount64;
-                pendingWorldID       = 0;
-                pendingWorldTicks    = 0;
-
-                provider.ResyncAfterWorldChange();
-            }
-        }
 
         // ── 通信最小化：只在布告板窗口正在显示时才做任何自动请求 ──
         // 目的：减少与游戏服务器 / Universalis 的通信，避免被判定为脚本或滥用。
         var isOverlayOpen = Overlay is { IsOpen: true };
 
-        if (isOverlayOpen && !wasOverlayOpen && provider.SelectedItemID != 0)
-            provider.RequestRefreshOnce("打开布告板"); // 玩家刚打开窗口：只补一次
+        if (isOverlayOpen && !wasOverlayOpen)
+        {
+            // 窗口关闭期间不监测日志 → 开窗时用角色当前世界校正一次（防止跨服后仍显示旧服数据）
+            SyncWorldOnWindowOpen();
+
+            // 玩家刚打开窗口：只补一次
+            if (provider.SelectedItemID != 0)
+                provider.RequestRefreshOnce("打开布告板");
+        }
 
         wasOverlayOpen = isOverlayOpen;
 
@@ -448,6 +426,76 @@ public unsafe partial class MarketBoardModule : ModuleBase
         // 逐步补齐跨世界价格：每次最多发起少量请求，避免一次性 28 连发（Universalis 429）
         if (provider.SelectedItemID != 0)
             provider.EnsurePriceData(provider.SelectedItemID, provider.HQOnly);
+    }
+
+    /// <summary>
+    /// 跨界传送判定（**仅在插件窗口打开时监测**）。
+    /// <para>
+    /// 游戏日志出现「使用跨界传送移动到了xxx。」表示玩家**已经落地新世界**，
+    /// 因此当帧立刻作废旧世界数据并重同步，不做任何去抖/延迟等待。
+    /// 除服务器名外该文案没有其它变体，故只按固定前缀匹配。
+    /// </para>
+    /// </summary>
+    private void OnWorldVisitLogMessage
+    (
+        uint                logMessageID,
+        LogMessageQueueItem item
+    )
+    {
+        if (!IsWorldVisitMonitoringActive()) return;
+
+        // 快路径：先按 LogMessage 行号过滤（模板含固定文案的行），未命中则不看文本
+        if (worldVisitLogMessageIDs.Count > 0 && !worldVisitLogMessageIDs.Contains(logMessageID)) return;
+
+        if (!TryParseWorldVisitWorldName(item.ToReadOnlySeString().ToString(), out var worldName))
+            return;
+
+        var worldID = ResolveWorldIDByName(worldName);
+
+        if (worldID == 0)
+        {
+            // 世界名未识别：退到「玩家实际所在世界」（角色结构体 → 大厅数据）
+            worldID = ResolvePlayerWorldID();
+
+            MarketDataProvider.DiagLog($"跨界传送日志命中但世界名未识别：\"{worldName}\"，改用玩家当前世界 {worldID}");
+        }
+
+        if (worldID == 0) return;
+
+        HandleWorldChange(worldID, worldName, $"跨界传送日志（{logMessageID}）");
+    }
+
+    /// <summary>
+    /// 窗口打开时校正世界：窗口关闭期间玩家可能已经跨服（此时不监测日志）。
+    /// 以角色结构体的当前世界为准（落地后即更新），发现不同即按跨服处理。
+    /// </summary>
+    private void SyncWorldOnWindowOpen()
+    {
+        var worldID = ResolvePlayerWorldID();
+
+        if (worldID == 0 || worldID == CurrentWorldID) return;
+
+        HandleWorldChange(worldID, LuminaWrapper.GetWorldName(worldID), "开窗校正");
+    }
+
+    /// <summary>
+    /// 跨服 / 世界切换的统一处理：更新当前世界 → 作废旧世界数据 → 重同步。
+    /// 全流程为本地操作（不发请求），搜索仍由「布告板可用即补」的既有机制驱动。
+    /// </summary>
+    private void HandleWorldChange
+    (
+        uint   worldID,
+        string worldName,
+        string reason
+    )
+    {
+        var previous = CurrentWorldID;
+        CurrentWorldID = worldID;
+
+        MarketDataProvider.DiagLog($"世界切换：{previous} → {worldID}（{worldName}）reason={reason}");
+
+        provider.InvalidateWorldData(reason);
+        provider.ResyncAfterWorldChange();
     }
 
     #endregion

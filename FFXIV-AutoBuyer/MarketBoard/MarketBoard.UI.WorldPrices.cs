@@ -186,7 +186,7 @@ public partial class MarketBoardModule
         ulong                currentWorldPrice
     )
     {
-        var isCurrentWorld = world.WorldID == GameState.CurrentWorld;
+        var isCurrentWorld = world.WorldID == CurrentWorldID;
         var isSelected = frame.IsViewingCurrentWorld ?
                              isCurrentWorld :
                              world.WorldID == frame.SelectedWorldID;
@@ -522,7 +522,7 @@ public partial class MarketBoardModule
         ulong                currentWorldPrice
     )
     {
-        var isCurrentWorld = worldID  == GameState.CurrentWorld;
+        var isCurrentWorld = worldID  == CurrentWorldID;
         var hasNoListing   = minPrice == ulong.MaxValue;
 
         using (ImRaii.Tooltip())
@@ -764,14 +764,14 @@ public partial class MarketBoardModule
 
         protected override bool IsSelected =>
             frame.IsViewingCurrentWorld ?
-                world.WorldID == GameState.CurrentWorld :
+                world.WorldID == CurrentWorldID :
                 world.WorldID == frame.SelectedWorldID;
 
         protected override Vector4 RestingBorder
         {
             get
             {
-                if (world.WorldID == GameState.CurrentWorld)
+                if (world.WorldID == CurrentWorldID)
                     return KnownColor.Pink.ToVector4().WithW(0.85f);
                 if (frame.Provider.MinPriceData.WorldID == world.WorldID && world.MinPrice != ulong.MaxValue)
                     return KnownColor.GreenYellow.ToVector4().WithW(0.85f);
@@ -781,7 +781,7 @@ public partial class MarketBoardModule
 
         protected override Vector4 HoveredBorder =>
             IsSelected                                                    ? KnownColor.DeepSkyBlue.ToVector4() :
-            world.WorldID                       == GameState.CurrentWorld ? KnownColor.Pink.ToVector4() :
+            world.WorldID                       == CurrentWorldID ? KnownColor.Pink.ToVector4() :
             frame.Provider.MinPriceData.WorldID == world.WorldID          ? KnownColor.GreenYellow.ToVector4() :
                                                                             KnownColor.DodgerBlue.ToVector4().WithW(0.8f);
 
@@ -795,7 +795,7 @@ public partial class MarketBoardModule
                     return null;
                 if (frame.Provider.MinPriceData.WorldID == world.WorldID && world.MinPrice != ulong.MaxValue)
                     return KnownColor.ForestGreen.ToVector4().WithW(0.35f);
-                if (world.WorldID == GameState.CurrentWorld)
+                if (world.WorldID == CurrentWorldID)
                     return KnownColor.DeepPink.ToVector4().WithW(0.25f);
                 return KnownColor.Black.ToVector4().WithW(0.30f);
             }
@@ -820,7 +820,7 @@ public partial class MarketBoardModule
             bool            isHovered
         )
         {
-            var isCurrentWorld = world.WorldID == GameState.CurrentWorld;
+            var isCurrentWorld = world.WorldID == CurrentWorldID;
             var isMinPrice     = frame.Provider.MinPriceData.WorldID == world.WorldID && world.MinPrice != ulong.MaxValue;
             var isMaxPrice = frame.Provider.MaxPriceData.WorldID == world.WorldID  &&
                              world.MinPrice                      != ulong.MaxValue &&

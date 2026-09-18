@@ -52,6 +52,13 @@ public unsafe partial class MarketBoardModule
     private sealed class LocalListingsDataSet
     {
         public List<MarketBoardListing> Listings = [];
+
+        /// <summary>
+        /// 挂单 ID → 该挂单在**游戏侧列表顺序**（按单价升序过滤后）中的行号。
+        /// 雇员名只能从游戏字符串数组按键取值；本地移除已购行后渲染行号会前移，
+        /// 因此必须用此原始行号取值，否则雇员名会整列错位（表现为「只有雇员列在上移」）。
+        /// </summary>
+        public Dictionary<ulong, int> SourceRowIndexes = [];
         public bool                     IsAnyHQ;
         public bool                     IsAnyOnMannequin;
         public bool                     IsAnyMateria;
@@ -89,13 +96,20 @@ public unsafe partial class MarketBoardModule
         public long LastSelectTime { get; private set; }
 
         public bool IsViewingCurrentWorld =>
-            SelectedWorldID == GameState.CurrentWorld;
+            SelectedWorldID == CurrentWorldID;
 
         /// <summary>
         /// 我方是否仍在等待「当前所选物品」的本地搜索完成。
         /// 为真时游戏侧 <c>SearchItemId</c> 可能仍是上一个物品，界面不应跟随游戏侧物品。
         /// </summary>
         public bool IsLocalListingsStale => localListingsStale;
+
+        /// <summary>
+        /// 暂停一切自动搜索（购买进行中由购买流程置为 true）。
+        /// 目的：购买过程中绝不允许补拉/刷新发起市场搜索请求 ——
+        /// 否则玩家会看到「购买时列表又刷新了一遍」。
+        /// </summary>
+        public bool AutoSearchSuppressed { get; set; }
 
         public WorldPriceRow MinPriceData { get; private set; }
 
@@ -132,14 +146,27 @@ public unsafe partial class MarketBoardModule
         private uint priceTableItemID;
 
         /// <summary>
-        /// 跨服后是否已确认「游戏侧数据属于新世界」。
-        /// 仅在观察到「列表被清空 → 重新到齐」的完整循环后才置为 true，
-        /// 避免把上一服务器的残留挂牌当作新服务器数据（并污染服务器最低价缓存）。
+        /// 本次会话内已购买、但游戏列表尚未刷新的挂单 ID。
+        /// 购买成功后立即从显示中移除（不多发请求），游戏数据刷新后自动清理。
         /// </summary>
-        private bool worldDataRefreshed = true;
+        private static readonly HashSet<ulong> locallyPurchasedListingIDs = [];
 
-        /// <summary>跨服后是否已观察到「列表未就绪」的状态（确认清空已生效）。</summary>
-        private bool worldDataNotReadySeen;
+        /// <summary>已购挂单集合的版本号：变化时使本地列表缓存失效。</summary>
+        private int locallyPurchasedVersion;
+
+        /// <summary>
+        /// 挂单 ID → 游戏字符串数组（雇员名）中所用的行号**记忆**。
+        /// 游戏侧字符串数组与市场代理数据并不同步刷新：购买后代理数据立刻少一行，
+        /// 但字符串数组里那一行的名字仍在（要等游戏布告板界面刷新才重排）。
+        /// 因此在「本地隐藏已购行」期间必须沿用隐藏之前的行号，否则雇员名会整体错位。
+        /// </summary>
+        private readonly Dictionary<ulong, int> retainerRowIndexes = [];
+
+        /// <summary>行号记忆上限（超出后整体重建，避免长期运行无界增长）。</summary>
+        private const int RETAINER_ROW_INDEX_LIMIT = 512;
+
+        /// <summary>跨服后是否在等待「游戏布告板可用」的时刻（可用即立刻搜索，不再空等延迟）。</summary>
+        private bool waitingBoardAfterWorldChange;
         private          string?                                 priceTableRegion;
         private          bool                                    priceTableHQOnly;
         private          bool                                    priceTableOnlyCurrentDC;
@@ -148,7 +175,7 @@ public unsafe partial class MarketBoardModule
         private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), CachedValue<HistoryDataSet>>  historyDataCache  = [];
         private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), CachedValue<ListingsDataSet>> listingsDataCache = [];
 
-        private (int ItemEpoch, uint ItemID, bool HQOnly, uint ListingCount, int ContentHash) localListingsFingerprint;
+        private (int ItemEpoch, uint ItemID, bool HQOnly, uint ListingCount, int ContentHash, int PurchasedVersion) localListingsFingerprint;
         private LocalListingsDataSet?                                                         localListingsData;
 
         private bool                                                    localListingsStale;
@@ -163,17 +190,17 @@ public unsafe partial class MarketBoardModule
         /// 参数刻意保守：游戏市场列表本身刷新较慢，频繁补拉会表现成「持续刷新」。
         /// </summary>
         // 补拉（单次获取 + 失败重试）策略。
-        // 注意：跨服后玩家需要重新走到市场布告板，IsAbleToSearchMarket() 才会为真，
+        // 注意：跨服后玩家需要重新走到市场布告板，IsAbleToSearchLocalMarket() 才会为真，
         // 因此总窗口只在「可以搜索」的时间段内消耗（不可搜索 / 服务器拒绝时自动续期），
         // 否则窗口会在玩家还没走到布告板前就过期，导致一直取不到数据。
         /// <summary>允许的自动补拉次数（每次仅请求 1 个物品）。</summary>
-        private const int LOCAL_SEARCH_RETRY_MAX_ATTEMPTS = 4;
+        private const int LOCAL_SEARCH_RETRY_MAX_ATTEMPTS = 2;
 
         /// <summary>首次补拉延迟：避开跨服落地瞬间（此时游戏侧尚不能搜索）。</summary>
-        private const long LOCAL_SEARCH_RETRY_FIRST_DELAY_MS = 5_000;
+        private const long LOCAL_SEARCH_RETRY_FIRST_DELAY_MS = 2_500;
 
         /// <summary>两次补拉之间的间隔。</summary>
-        private const long LOCAL_SEARCH_RETRY_INTERVAL_MS = 10_000;
+        private const long LOCAL_SEARCH_RETRY_INTERVAL_MS = 8_000;
 
         /// <summary>补拉总窗口（仅在可搜索时计时）。</summary>
         private const long LOCAL_SEARCH_RETRY_TOTAL_MS = 60_000;
@@ -373,7 +400,7 @@ public unsafe partial class MarketBoardModule
 
             if (IsViewingCurrentWorld && (forceRefresh || !GameState.Instance().IsMarketListingsStuck))
             {
-                if (IsAbleToSearchMarket())
+                if (IsAbleToSearchLocalMarket())
                 {
                     // 请求可能因「上一次尚未完成/限流」被跳过，此时交给补拉机制稍后重试
                     if (!RequestLocalSearchData(itemID, forceRefresh, $"SelectItem:{reason}"))
@@ -422,7 +449,7 @@ public unsafe partial class MarketBoardModule
         }
 
         public void AnchorWorld() =>
-            SelectedWorldID = GameState.CurrentWorld;
+            SelectedWorldID = CurrentWorldID;
 
         public void EnsureAnchored()
         {
@@ -440,34 +467,11 @@ public unsafe partial class MarketBoardModule
         private bool IsGameMarketDataUsable
         (
             uint itemID
-        )
-        {
-            if (InfoProxy == null || !IsAbleToSearchLocalMarket() || InfoProxy->SearchItemId != itemID)
-                return false;
-
-            var isReady = InfoProxy->IsFullyReceived();
-
-            if (!worldDataRefreshed)
-            {
-                if (!isReady)
-                {
-                    // 清空已生效：等待重新到齐
-                    worldDataNotReadySeen = true;
-                    return false;
-                }
-
-                if (!worldDataNotReadySeen)
-                {
-                    DiagLog($"忽略疑似旧世界残留的游戏数据 item={itemID}");
-                    return false;
-                }
-
-                worldDataRefreshed = true;
-                DiagLog($"新世界的游戏侧数据已就绪 item={itemID}");
-            }
-
-            return isReady;
-        }
+        ) =>
+            InfoProxy                 != null                  &&
+            IsAbleToSearchLocalMarket()                        &&
+            InfoProxy->SearchItemId   == itemID                &&
+            InfoProxy->IsFullyReceived();
 
         /// <summary>
         /// 检测到跨服 / 世界切换时**立刻**作废旧世界的全部显示数据（不发起任何请求）。
@@ -479,10 +483,9 @@ public unsafe partial class MarketBoardModule
             string reason
         )
         {
-            worldDataRefreshed    = false;
-            worldDataNotReadySeen = false;
+            waitingBoardAfterWorldChange = true;
 
-            SelectedWorldID = GameState.CurrentWorld;
+            SelectedWorldID = CurrentWorldID;
 
             var info = InfoProxy;
 
@@ -509,25 +512,21 @@ public unsafe partial class MarketBoardModule
 
         public void ResyncAfterWorldChange()
         {
-            DiagLog($"世界重同步 world={GameState.CurrentWorld} item={SelectedItemID}");
+            DiagLog($"世界重同步 world={CurrentWorldID} item={SelectedItemID}");
 
-            SelectedWorldID     = GameState.CurrentWorld;
+            SelectedWorldID     = CurrentWorldID;
             EffectiveRegionName = UniversalisApi.ChinaRegionName;
 
-            // 世界数据已在「发现世界变化」的当帧由 InvalidateWorldData 作废并标记补拉；
-            // 此处仅在尚未作废（兜底路径）时清理，避免把刚取到的新世界数据再清一次、白跑一次请求。
-            if (worldDataRefreshed)
-            {
-                var info = InfoProxy;
-                if (info != null)
-                    info->ClearListData();
+            var info = InfoProxy;
 
-                ClearAllData();
+            if (info != null)
+                info->ClearListData();
 
-                // 跨服后不再立即发起游戏搜索（减少与游戏服务器通信），
-                // 仅标记待补拉：若布告板窗口开着，稍后由补拉机制补 1 次；窗口关着则完全不请求。
-                MarkLocalListingsStale(info, "世界重同步");
-            }
+            ClearAllData();
+
+            // 跨服后不再立即发起游戏搜索（减少与游戏服务器通信），
+            // 仅标记待补拉：若布告板窗口开着，稍后由补拉机制补 1 次；窗口关着则完全不请求。
+            MarkLocalListingsStale(info, "世界重同步");
         }
 
         /// <summary>让卡片区的世界价格表在下次绘制时重建（世界目录变化后调用）。</summary>
@@ -588,6 +587,9 @@ public unsafe partial class MarketBoardModule
             localListingsBaseline    = info == null ?
                                            default :
                                            (info->SearchItemId, info->EntryCount, info->ListingCount);
+
+            // 即将重新获取数据 → 清空已购记录与雇员名行号记忆（新数据的行号会整体重排）
+            ResetPurchasedListings();
         }
 
         /// <summary>
@@ -612,6 +614,15 @@ public unsafe partial class MarketBoardModule
         /// </summary>
         public void RetryLocalSearchIfStale()
         {
+            // 购买进行中：不发起任何自动搜索（窗口顺延，等购买结束后再按需补拉）
+            if (AutoSearchSuppressed)
+            {
+                if (localListingsStale)
+                    localSearchRetryDeadline = Environment.TickCount64 + LOCAL_SEARCH_RETRY_TOTAL_MS;
+
+                return;
+            }
+
             if (!localListingsStale) return;
 
             var info = InfoProxy;
@@ -632,11 +643,21 @@ public unsafe partial class MarketBoardModule
 
             var now = Environment.TickCount64;
 
-            // 尚不能搜索（跨服途中 / 布告板未打开）：窗口自动续期，等待玩家真正能搜索的时刻
-            if (!IsAbleToSearchMarket())
+            // 尚不能搜索（未登录 / 在副本内 / **过场中**）：窗口自动续期，
+            // 等待玩家真正能（且应该）搜索的时刻 —— 过场期间请求只会拿到原服务器的数据
+            if (!IsAbleToSearchLocalMarket() || IsPlayerTransitioning)
             {
                 localSearchRetryDeadline = now + LOCAL_SEARCH_RETRY_TOTAL_MS;
                 return;
+            }
+
+            // 跨服后第一次可以搜索：立刻发出请求，不再空等首次延迟（减少跨服后的刷新等待）
+            if (waitingBoardAfterWorldChange)
+            {
+                waitingBoardAfterWorldChange = false;
+                localSearchNextRetryTick     = 0;
+
+                DiagLog("跨服后布告板已可用 → 立即发起搜索");
             }
 
             // 服务器正在拒绝请求：不消耗窗口与尝试次数，等冷却结束再补
@@ -677,6 +698,46 @@ public unsafe partial class MarketBoardModule
         /// 隐式刷新：请求新数据但不隐藏当前列表；<c>GetLocalListingsDataSet</c> 等到指纹变化后
         /// 才原子替换数据，期间 UI 继续渲染旧列表。
         /// </summary>
+        /// <summary>
+        /// 清空「已购挂单」记录与雇员名行号记忆。
+        /// 只在**重新请求过新数据**时调用（手动刷新 / 开窗补拉 / 切换物品 / 切换世界）：
+        /// 这些时刻游戏侧的字符串数组与代理数据会一起重排，行号记忆随之失效。
+        /// </summary>
+        private void ResetPurchasedListings()
+        {
+            locallyPurchasedListingIDs.Clear();
+            locallyPurchasedVersion++;
+            retainerRowIndexes.Clear();
+        }
+
+        /// <summary>
+        /// 该挂单是否已在本次会话中被买走（游戏侧列表可能尚未刷新）。
+        /// 购买循环据此跳过，避免对已售出的挂单重复下单。
+        /// </summary>
+        public static bool IsListingPurchased
+        (
+            ulong listingID
+        ) =>
+            listingID != 0 && locallyPurchasedListingIDs.Contains(listingID);
+
+        /// <summary>
+        /// 记录一个已购买成功的挂单：立即从显示列表中移除，直到游戏侧数据刷新。
+        /// </summary>
+        public void MarkListingPurchased
+        (
+            ulong listingID
+        )
+        {
+            if (listingID == 0) return;
+
+            if (locallyPurchasedListingIDs.Add(listingID))
+            {
+                locallyPurchasedVersion++;
+
+                DiagLog($"已购挂单本地移除 listing={listingID}（累计 {locallyPurchasedListingIDs.Count}）");
+            }
+        }
+
         public void BeginImplicitRefresh
         (
             uint itemID
@@ -824,6 +885,8 @@ public unsafe partial class MarketBoardModule
             localListingsData        = null;
             localListingsFingerprint = default;
             localListingsStale       = false;
+
+            ResetPurchasedListings();
             localSearchRetryDeadline = 0;
             localListingsBaseline    = default;
             itemEpoch++;
@@ -906,7 +969,7 @@ public unsafe partial class MarketBoardModule
             if (!string.IsNullOrEmpty(targetRegionName))
                 owner.allWorlds.TryGetValue(targetRegionName, out targetRegion);
 
-            targetRegion ??= owner.allWorlds.Values.FirstOrDefault(r => r.Values.Any(dc => dc.ContainsKey(GameState.CurrentWorld)));
+            targetRegion ??= owner.allWorlds.Values.FirstOrDefault(r => r.Values.Any(dc => dc.ContainsKey(CurrentWorldID)));
 
             if (targetRegion == null)
                 return false;
@@ -1012,7 +1075,7 @@ public unsafe partial class MarketBoardModule
             var marketCacheKey = (itemID, SelectedWorldID, hqOnly);
 
             // 本服在售列表可直接从游戏读取时，无需再向 Universalis 请求同一世界的挂牌数据
-            var localDataAvailable = SelectedWorldID == GameState.CurrentWorld &&
+            var localDataAvailable = SelectedWorldID == CurrentWorldID &&
                                      IsGameMarketDataUsable(itemID);
 
             if (!localDataAvailable)
@@ -1234,11 +1297,15 @@ public unsafe partial class MarketBoardModule
             InfoProxyItemSearch* info
         )
         {
+            // 先推进「世界数据是否可用」的状态机：否则跨服后可能因提前 return
+            // 而永远观察不到「未就绪 → 到齐」，导致列表一直不显示。
+            var gameDataUsable = IsGameMarketDataUsable(info->SearchItemId);
+
             if (localListingsStale)
             {
                 var currentState = (info->SearchItemId, info->EntryCount, info->ListingCount);
 
-                if (currentState == localListingsBaseline)
+                if (currentState == localListingsBaseline && !gameDataUsable)
                 {
                     DiagLog($"本地列表为空返回（等待新数据）item={info->SearchItemId} 基线={localListingsBaseline}");
                     return EmptyLocalListings();
@@ -1248,16 +1315,10 @@ public unsafe partial class MarketBoardModule
                 localSearchRetryAttempts = 0;
             }
 
-            if (!IsGameMarketDataUsable(info->SearchItemId))
+            if (!gameDataUsable)
             {
-                // 跨服过渡期（含「新旧世界无法确认」）：一律不显示，避免显示上一服务器数据
-                if (!worldDataRefreshed)
-                {
-                    DiagLog($"跨服过渡：本地列表暂不显示 item={info->SearchItemId}");
-                    return EmptyLocalListings();
-                }
-
-                // 同世界内的隐式刷新：新数据成功获取前沿用上一次完整数据，不隐藏列表
+                // 隐式刷新：新数据成功获取前沿用上一次完整数据，不隐藏列表
+                // （跨服时 localListingsData 已被 InvalidateWorldData 清空，因此不会显示旧世界数据）
                 if (localListingsData != null)
                 {
                     DiagLog($"本地列表暂未接收完整，沿用上一次数据 item={info->SearchItemId}");
@@ -1269,8 +1330,14 @@ public unsafe partial class MarketBoardModule
             }
 
             var sourceListings = info->Listings.ToArray();
+
+            // 注意：**不要**因为「游戏数据里已没有该挂单」就删除已购记录。
+            // 游戏侧字符串数组（雇员名）与代理数据并不同步刷新：数据先少一行、字符串后重排，
+            // 若此时清掉记录，行号记忆会被判定为「无隐藏行」而重新归位 → 雇员名整体错位。
+            // 记录只在「重新请求过新数据」时清空（见 ResetPurchasedListings）。
+
             var contentHash    = CalculateLocalListingsHash(sourceListings);
-            var fingerprint    = (itemEpoch, info->SearchItemId, HQOnly, info->ListingCount, contentHash);
+            var fingerprint    = (itemEpoch, info->SearchItemId, HQOnly, info->ListingCount, contentHash, locallyPurchasedVersion);
             if (localListingsData != null && localListingsFingerprint == fingerprint)
                 return localListingsData;
 
@@ -1325,20 +1392,41 @@ public unsafe partial class MarketBoardModule
                                 .OrderBy(x => x.UnitPrice)
                                 .ToArray();
 
-            var isAnyHQ          = listingsArray.Any(x => x.IsHqItem);
-            var isAnyOnMannequin = listingsArray.Any(x => x.IsMannequin);
+            // 雇员名行号记忆：只在「没有本地隐藏行」时按当前顺序归位；
+            // 正在隐藏已购行时沿用既有行号（游戏字符串数组里那些行的名字此时仍然存在）。
+            if (locallyPurchasedListingIDs.Count == 0 || retainerRowIndexes.Count > RETAINER_ROW_INDEX_LIMIT)
+            {
+                retainerRowIndexes.Clear();
+
+                for (var index = 0; index < listingsArray.Length; index++)
+                    retainerRowIndexes[listingsArray[index].ListingId] = index;
+            }
+            else
+            {
+                // 新出现的挂单（记忆中没有）用当前位置兜底
+                for (var index = 0; index < listingsArray.Length; index++)
+                    retainerRowIndexes.TryAdd(listingsArray[index].ListingId, index);
+            }
+
+            // 已购挂单仅在本地隐藏（游戏数据刷新前），不参与显示与统计
+            var visibleListings = listingsArray
+                                  .Where(x => !locallyPurchasedListingIDs.Contains(x.ListingId))
+                                  .ToArray();
+
+            var isAnyHQ = visibleListings.Any(x => x.IsHqItem);
+
             var isAnyMateria = LuminaGetter.TryGetRow<Item>(itemID, out var itemData) &&
-                               itemData.MateriaSlotCount > 0                          &&
-                               listingsArray.Any(x => x.MateriaCount > 0);
+                               itemData.MateriaSlotCount > 0                         &&
+                               visibleListings.Any(x => x.MateriaCount > 0);
 
             return new()
             {
-                Listings         = [.. listingsArray],
+                Listings         = [.. visibleListings],
+                SourceRowIndexes = retainerRowIndexes,
                 IsAnyHQ          = isAnyHQ,
-                IsAnyOnMannequin = isAnyOnMannequin,
                 IsAnyMateria     = isAnyMateria,
-                TotalCount       = listingsArray.Length,
-                TotalQty         = listingsArray.Aggregate(0U, (acc, l) => acc + l.Quantity)
+                TotalCount       = visibleListings.Length,
+                TotalQty         = visibleListings.Aggregate(0U, (acc, l) => acc + l.Quantity)
             };
         }
 
@@ -1425,7 +1513,7 @@ public unsafe partial class MarketBoardModule
                         var minPrice = ulong.MaxValue;
 
                         // 1) 当前世界：服务器实时数据（游戏内市场列表）
-                        if (worldID == GameState.CurrentWorld && IsGameMarketDataUsable(itemID))
+                        if (worldID == CurrentWorldID && IsGameMarketDataUsable(itemID))
                         {
                             var listings = InfoProxy->Listings.ToArray()
                                                               .Where
@@ -1524,7 +1612,7 @@ public unsafe partial class MarketBoardModule
             }
 
             var currentWorldPrice = cachedDCWorldPrices.SelectMany(x => x.Value)
-                                                       .FirstOrDefault(x => x.WorldID == GameState.CurrentWorld);
+                                                       .FirstOrDefault(x => x.WorldID == CurrentWorldID);
 
             return new(validWorldPrices, cheapestWorlds, expensiveWorlds, currentWorldPrice);
         }
@@ -1535,7 +1623,7 @@ public unsafe partial class MarketBoardModule
             if (!owner.allWorlds.TryGetValue(EffectiveRegionName, out var dcsInRegion))
                 return string.Empty;
 
-            var currentWorld = GameState.CurrentWorld;
+            var currentWorld = CurrentWorldID;
 
             foreach (var (dcName, worldsInDC) in dcsInRegion)
             {
@@ -1629,7 +1717,7 @@ public unsafe partial class MarketBoardModule
             bool hqOnly
         )
         {
-            if (SelectedWorldID == GameState.CurrentWorld && IsGameMarketDataUsable(itemID))
+            if (SelectedWorldID == CurrentWorldID && IsGameMarketDataUsable(itemID))
             {
                 var localMinPrice = InfoProxy->Listings.ToArray()
                                                    .Where

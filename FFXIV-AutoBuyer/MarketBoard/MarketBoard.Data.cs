@@ -162,6 +162,16 @@ public unsafe partial class MarketBoardModule
         /// </summary>
         private readonly Dictionary<ulong, int> retainerRowIndexes = [];
 
+        /// <summary>
+        /// 已购隐藏行的「雇员名探针」：挂单 ID → (隐藏时的行号, 该行号处的雇员名)。
+        /// <para>
+        /// 字符串数组与代理数据不同步：代理数据先少一行、字符串数组随后才重排。
+        /// 只有在字符串数组**尚未重排**时，雇员名才需要按隐藏前的原行号取；
+        /// 一旦它重排了，原行号处的名字就不再是隐藏时那个名字 —— 据此判断用哪套行号。
+        /// </para>
+        /// </summary>
+        private readonly Dictionary<ulong, (int RowIndex, string Name)> hiddenRowProbes = [];
+
         /// <summary>行号记忆上限（超出后整体重建，避免长期运行无界增长）。</summary>
         private const int RETAINER_ROW_INDEX_LIMIT = 512;
 
@@ -708,6 +718,7 @@ public unsafe partial class MarketBoardModule
             locallyPurchasedListingIDs.Clear();
             locallyPurchasedVersion++;
             retainerRowIndexes.Clear();
+            hiddenRowProbes.Clear();
         }
 
         /// <summary>
@@ -721,7 +732,58 @@ public unsafe partial class MarketBoardModule
             listingID != 0 && locallyPurchasedListingIDs.Contains(listingID);
 
         /// <summary>
+        /// 游戏字符串数组是否仍保留「已购隐藏行」的槽位 —— 即**尚未**随代理数据重排。
+        /// <para>
+        /// 判定方式：所有探针在原行号处都还能读到隐藏时那个雇员名，才视为尚未重排
+        /// （此时雇员名必须按隐藏前的原行号取，否则整列会上移）。
+        /// 没有探针 / 有任何一个探针失效 → 视为已重排（按当前显示行号取即可）。
+        /// </para>
+        /// </summary>
+        public bool ArePurchasedRowsStillInStringArray()
+        {
+            if (hiddenRowProbes.Count == 0) return false;
+
+            var hasProbe = false;
+
+            foreach (var (rowIndex, name) in hiddenRowProbes.Values)
+            {
+                if (string.IsNullOrEmpty(name)) continue;
+
+                hasProbe = true;
+
+                // 只要有一个原行号处的名字变了，就说明字符串数组整体已重排
+                if (GetRetainerNameAtRow(rowIndex) != name) return false;
+            }
+
+            return hasProbe;
+        }
+
+        /// <summary>
+        /// 按当前游戏代理数据的顺序重建雇员名行号记忆（字符串数组已重排、旧记忆失效时调用）。
+        /// 过滤与排序规则与 <c>BuildLocalListingsDataSet</c> 保持一致：物品 + HQ 过滤、按单价升序。
+        /// </summary>
+        private void RebuildRetainerRowMemory()
+        {
+            hiddenRowProbes.Clear();
+            retainerRowIndexes.Clear();
+
+            var info = InfoProxy;
+            if (info == null) return;
+
+            var index = 0;
+
+            foreach (var listing in info->Listings.ToArray()
+                                        .Where(x => x.ItemId == info->SearchItemId && x.UnitPrice != 0 && (x.IsHqItem || !HQOnly))
+                                        .OrderBy(x => x.UnitPrice))
+                retainerRowIndexes[listing.ListingId] = index++;
+
+            DiagLog($"字符串数组已重排 → 重建雇员名行号记忆（{retainerRowIndexes.Count} 行）");
+        }
+
+        /// <summary>
         /// 记录一个已购买成功的挂单：立即从显示列表中移除，直到游戏侧数据刷新。
+        /// 同时记下「雇员名探针」，供 <see cref="ArePurchasedRowsStillInStringArray"/> 判断
+        /// 字符串数组是否已经重排。
         /// </summary>
         public void MarkListingPurchased
         (
@@ -734,7 +796,20 @@ public unsafe partial class MarketBoardModule
             {
                 locallyPurchasedVersion++;
 
-                DiagLog($"已购挂单本地移除 listing={listingID}（累计 {locallyPurchasedListingIDs.Count}）");
+                // 两次购买之间字符串数组可能自行重排过：旧记忆此时已失效，
+                // 先按当前数据顺序重建，再用重建后的行号记录探针。
+                if (hiddenRowProbes.Count > 0 && !ArePurchasedRowsStillInStringArray())
+                    RebuildRetainerRowMemory();
+
+                var rowIndex = retainerRowIndexes.GetValueOrDefault(listingID, -1);
+
+                if (rowIndex >= 0)
+                    hiddenRowProbes[listingID] = (rowIndex, GetRetainerNameAtRow(rowIndex) ?? string.Empty);
+
+                if (hiddenRowProbes.Count > RETAINER_ROW_INDEX_LIMIT)
+                    hiddenRowProbes.Clear();
+
+                DiagLog($"已购挂单本地移除 listing={listingID} 雇员名行号={rowIndex}（累计 {locallyPurchasedListingIDs.Count}）");
             }
         }
 

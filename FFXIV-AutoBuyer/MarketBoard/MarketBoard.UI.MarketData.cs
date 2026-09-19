@@ -189,13 +189,18 @@ public unsafe partial class MarketBoardModule
         InfoProxyItemSearch* info
     )
     {
-        var dataset       = provider.GetLocalListingsDataSet(info);
-        var listingsArray = dataset.Listings;
+        var dataset = provider.GetLocalListingsDataSet(info);
 
-        if (provider.IsImplicitRefreshPending || listingsArray.Count == 0)
+        // 渲染期再过滤一次已购行：数据集在「游戏数据未接收完整」时沿用上一次快照，
+        // 其中可能仍含刚买掉的那一行 —— 不过滤就会出现「三列不动、只有雇员列上移」。
+        var listingsArray = dataset.Listings
+                                   .Where(x => !MarketDataProvider.IsListingPurchased(x.ListingId))
+                                   .ToArray();
+
+        if (provider.IsImplicitRefreshPending || listingsArray.Length == 0)
             ImGui.TextDisabled($"{FontAwesomeIcon.Sync.ToIconString()} {Lang.Get("BetterMarketBoard-Purchase-Refreshing")}");
 
-        var isAnyHQ              = dataset.IsAnyHQ;
+        var isAnyHQ              = listingsArray.Any(x => x.IsHqItem);
         var isAnyMateriaEquipped = dataset.IsAnyMateria;
 
         var columnsCount = 4;
@@ -253,6 +258,9 @@ public unsafe partial class MarketBoardModule
 
         var counter    = -1;
         var benchmarks = BuildMarketBenchmarks(frame.NPCGilPrice);
+
+        // 雇员名行号策略每帧只判定一次：字符串数组尚未重排 → 用隐藏前的原行号；已重排 → 用当前显示行号
+        var useOriginalRetainerRow = provider.ArePurchasedRowsStillInStringArray();
 
         foreach (var listing in listingsArray)
         {
@@ -337,15 +345,18 @@ public unsafe partial class MarketBoardModule
 
             ImGui.TableNextColumn();
 
-            // 雇员名来自游戏字符串数组，只能按行号取；已购行被本地隐藏后渲染行号会前移，
-            // 必须用该挂单在游戏侧顺序中的原始行号，否则雇员名整列会错位（「只有雇员列在上移」）
-            var sourceRowIndex = dataset.SourceRowIndexes.TryGetValue(listing.ListingId, out var rowIndex) ?
-                                     rowIndex :
+            // 雇员名来自游戏字符串数组，只能按行号取。
+            //  · 字符串数组尚未重排（本地隐藏已购行后渲染行号前移）→ 用隐藏前的原行号；
+            //  · 已重排（原行号处的名字已不是隐藏时那个雇员）→ 用当前显示行号。
+            // 用错就会出现「只有雇员列整体上移 / 下移」。
+            var sourceRowIndex = useOriginalRetainerRow &&
+                                 dataset.SourceRowIndexes.TryGetValue(listing.ListingId, out var originalRowIndex) ?
+                                     originalRowIndex :
                                      counter;
 
-            var retainerName = AtkStage.Instance()->GetStringArrayData(StringArrayType.ItemSearch)->StringArray[208 + (6 * sourceRowIndex)];
-            if (retainerName.HasValue)
-                ImGui.TextUnformatted($"{retainerName.ToString()}");
+            var retainerName = GetRetainerNameAtRow(sourceRowIndex);
+            if (retainerName != null)
+                ImGui.TextUnformatted(retainerName);
         }
 
         foreach (var b in benchmarks)
@@ -438,5 +449,29 @@ public unsafe partial class MarketBoardModule
                 b.Drawn = true;
             }
         }
+    }
+
+    /// <summary>
+    /// 读取游戏字符串数组中某个「市场列表行」的雇员名。
+    /// <para>
+    /// 布局：<c>StringArrayType.ItemSearch</c> 的第 <c>208 + 6 × 行号</c> 项为雇员名。
+    /// 该数组由游戏维护，与市场代理数据**不同步**（数据先少一行、字符串后重排），
+    /// 因此调用方必须自行决定用「隐藏前的原行号」还是「当前显示行号」。
+    /// </para>
+    /// </summary>
+    private static string? GetRetainerNameAtRow
+    (
+        int rowIndex
+    )
+    {
+        if (rowIndex < 0) return null;
+
+        var stringArrayData = AtkStage.Instance()->GetStringArrayData(StringArrayType.ItemSearch);
+
+        if (stringArrayData == null) return null;
+
+        var retainerName = stringArrayData->StringArray[208 + (6 * rowIndex)];
+
+        return retainerName.HasValue ? retainerName.ToString() : null;
     }
 }

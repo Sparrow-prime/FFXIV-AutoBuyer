@@ -1,6 +1,7 @@
 using FFXIVClientStructs.FFXIV.Client.Game;
 using System.Numerics;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
+using Lumina.Excel.Sheets;
 using OmenTools.Interop.Game.Lumina;
 using OmenTools.OmenService;
 
@@ -18,6 +19,35 @@ public unsafe partial class MarketBoardModule
     private static readonly Vector4 PurchaseButtonHoveredColor = new(0.58f, 0.31f, 0.08f, 1f);
     private static readonly Vector4 PurchaseButtonActiveColor  = new(0.36f, 0.19f, 0.05f, 1f);
     private static readonly Vector4 PurchaseButtonTextColor    = new(1.00f, 0.86f, 0.62f, 1f);
+
+    /// <summary>
+    /// 水晶类物品（碎晶 / 水晶 / 晶簇）的绝对持有上限：单格 9999。
+    /// </summary>
+    private const uint CRYSTAL_STACK_LIMIT = 9999;
+
+    /// <summary>
+    /// 是否为水晶类物品：存放于水晶专用背包、可堆叠上限为 9999。
+    /// 判据取「堆叠上限 = 9999」（数据驱动，不硬编码分类行号）。
+    /// </summary>
+    private static bool IsCrystalItem
+    (
+        uint itemID
+    ) =>
+        LuminaGetter.TryGetRow<Item>(itemID, out var item) && item.StackSize >= CRYSTAL_STACK_LIMIT;
+
+    /// <summary>
+    /// 水晶类的「绝对容量」满包判定：持有量 + 本单数量超过 9999 时必定收不下
+    /// （再多也只会溢出），因此直接判失败，不必发出注定被拒的购买请求。
+    /// </summary>
+    private static bool IsCrystalCapacityExceeded
+    (
+        uint itemID,
+        uint heldCount,
+        uint nextQuantity
+    ) =>
+        nextQuantity != 0 &&
+        IsCrystalItem(itemID) &&
+        (ulong)heldCount + nextQuantity > CRYSTAL_STACK_LIMIT;
 
     /// <summary>
     /// 是否**确实**无法收到该物品（用于避免发出注定失败的购买请求）。
@@ -87,8 +117,12 @@ public unsafe partial class MarketBoardModule
     /// </summary>
     private const long PURCHASE_DATA_WAIT_MS = 8_000;
 
-    /// <summary>等待单次购买生效的最长时间（毫秒）：缩短以便失败时尽快反馈。</summary>
-    private const long PURCHASE_WAIT_MS = 4_000;
+    /// <summary>
+    /// 等待单次购买生效的最长时间（毫秒）：超过即判为失败并提示，故取值偏短以便尽快反馈。
+    /// 正常购买结果在数百毫秒内返回（游戏侧列表会少一行 / 持有量增加），
+    /// 任务轮询间隔为 500ms，2 秒足够覆盖 4 次判定。
+    /// </summary>
+    private const long PURCHASE_WAIT_MS = 2_000;
 
     /// <summary>两次购买请求之间的间隔，留给游戏处理与列表刷新，避免连续下单。</summary>
     private const long PURCHASE_COOLDOWN_MS = 350;
@@ -372,6 +406,19 @@ public unsafe partial class MarketBoardModule
         if (firstListing == null)
         {
             FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-NoListing"));
+            return true;
+        }
+
+        // 4.1) 水晶类专属满包判定：持有量 + 本单数量超过 9999 绝对上限 → 直接失败
+        //      （水晶背包单格上限 9999，超出后游戏必定拒绝，发出请求只是白等）
+        if (IsCrystalCapacityExceeded(purchaseItemID, heldCount, firstListing.Value.Quantity))
+        {
+            MarketDataProvider.DiagLog
+            (
+                $"水晶类超上限：持有 {heldCount} + 本单 {firstListing.Value.Quantity} > {CRYSTAL_STACK_LIMIT}，直接判失败"
+            );
+
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-StackLimit"));
             return true;
         }
 

@@ -17,6 +17,7 @@
   "BetterMarketBoard-Purchase-Button": "购买",
   "BetterMarketBoard-Purchase-Button-Help": "从当前服务器最低价开始逐条购买，直到持有数量达到 {0}（每次购买整条挂单）。",
   "BetterMarketBoard-Purchase-Failed-InventoryFull": "背包已满或无法继续购买",
+  "BetterMarketBoard-Purchase-Failed-StackLimit": "该物品已达持有上限（9999），无法继续购买",
   "BetterMarketBoard-Purchase-Held": "持有数量",
   "BetterMarketBoard-Purchase-InProgress": "购买中…",
   "BetterMarketBoard-Purchase-InProgress-Help": "正在按目标数量购买，点击可停止。",

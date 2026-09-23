@@ -3,6 +3,7 @@ using FFXIVAutoBuyer.Host;
 using FFXIVAutoBuyer.Localization;
 using FFXIVAutoBuyer.MarketBoard;
 using OmenTools;
+using OmenTools.OmenService;
 
 namespace FFXIVAutoBuyer;
 
@@ -22,7 +23,11 @@ public sealed class Plugin : IDalamudPlugin
     {
         this.pluginInterface = pluginInterface;
 
-        DService.Init(pluginInterface);
+        // 本插件不使用道具 / 技能工具提示上的市场数据，因此**不初始化** TooltipManager：
+        // 它的 Init 会无条件挂上游戏 ItemDetail / ActionDetail 的 PreRequestedUpdate 监听，
+        // 于是「每悬停一次道具」都会打两条冗长日志、并让所有提示框都走一遍它的流程。
+        // 关掉后：日志干净（不再出现 [TooltipManager] 行）、提示框不被追加任何内容。
+        DService.Init(pluginInterface, static () => new DServiceInitOptions().Disable<TooltipManager>());
 
         // 模块的 ModuleInfo 会在构造时调用 Lang.Get，因此本地化必须先于模块实例化完成
         LocalizationSetup.Configure(pluginInterface);

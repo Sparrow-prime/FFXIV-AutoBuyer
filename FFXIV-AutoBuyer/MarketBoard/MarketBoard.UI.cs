@@ -33,6 +33,17 @@ public unsafe partial class MarketBoardModule
 
     private long lastGameItemAdoptTick;
 
+    /// <summary>
+    /// 游戏侧**确实显示过我方当前所选物品**的一次确认：(物品 ID, 物品纪元)。
+    /// <para>
+    /// 只有它成立过，之后游戏侧换成别的物品才可能是「玩家在游戏里自己改的」；
+    /// 否则游戏侧显示的只是**我们更早请求过、而本次请求尚未被游戏接受**的物品 ——
+    /// 此时跟随就会表现为「连续切换物品后选中物品回弹」。
+    /// </para>
+    /// 物品纪元（<see cref="MarketDataProvider.ItemEpoch"/>）保证「A→B→A」这种回到同一物品的情形也算重新确认。
+    /// </summary>
+    private (uint ItemID, int Epoch) acknowledgedGameItem;
+
     /// <summary>跟随游戏物品的最小间隔与同一物品的跟随冷却。</summary>
     /// <summary>
     /// 玩家主动选择物品后的保护期：期间一律不跟随游戏侧物品
@@ -78,12 +89,6 @@ public unsafe partial class MarketBoardModule
 
         ImGui.NewLine();
 
-        if (ImGui.Checkbox(Lang.Get("BetterMarketBoard-Config-AppendMarketStatsTooltip"), ref config.AppendMarketStatsTooltip))
-            SaveConfig(config);
-        ImGuiOm.HelpMarker(Lang.Get("BetterMarketBoard-Config-AppendMarketStatsTooltip-Help"));
-
-        ImGui.NewLine();
-
         if (ImGui.Checkbox(Lang.Get("BetterMarketBoard-Config-EnableDiagnostics"), ref config.EnableDiagnostics))
         {
             MarketDataProvider.DiagnosticsEnabled = config.EnableDiagnostics;
@@ -91,6 +96,13 @@ public unsafe partial class MarketBoardModule
         }
 
         ImGuiOm.HelpMarker(Lang.Get("BetterMarketBoard-Config-EnableDiagnostics-Help"));
+
+        ImGui.NewLine();
+
+        if (ImGui.Checkbox(Lang.Get("BetterMarketBoard-Config-NotifyInventoryFull"), ref config.NotifyInventoryFull))
+            SaveConfig(config);
+
+        ImGuiOm.HelpMarker(Lang.Get("BetterMarketBoard-Config-NotifyInventoryFull-Help"));
 
         ImGui.NewLine();
 
@@ -203,6 +215,10 @@ public unsafe partial class MarketBoardModule
 
         if (proxyItemID == 0 || proxyItemID == provider.SelectedItemID)
         {
+            // 游戏侧确实显示着我方当前所选物品 → 记为「本次选择已被游戏确认」
+            if (proxyItemID != 0)
+                acknowledgedGameItem = (proxyItemID, provider.ItemEpoch);
+
             pendingGameItemID = 0;
             return;
         }
@@ -220,6 +236,20 @@ public unsafe partial class MarketBoardModule
         if (provider.IsLocalListingsStale)
         {
             MarketDataProvider.DiagLog($"跟随游戏物品被跳过（我方搜索未完成）game={proxyItemID}");
+            return;
+        }
+
+        // 我方这次的所选物品**从未被游戏侧接受过**（游戏侧显示的是更早请求过的物品）→ 不跟随。
+        // 这是「连续快速切换物品后，选中物品回弹到更早那个物品」的根因：
+        // 快速切换时中间若干次搜索请求会被节流/在途判定跳过，游戏侧一直停在较早的物品上，
+        // 若此时跟随，就会把玩家的最新选择改回旧物品。
+        if (acknowledgedGameItem != (provider.SelectedItemID, provider.ItemEpoch))
+        {
+            MarketDataProvider.DiagLog
+            (
+                $"跟随游戏物品被跳过（我方所选物品尚未被游戏确认）game={proxyItemID} ours={provider.SelectedItemID} 上次确认={acknowledgedGameItem}"
+            );
+
             return;
         }
 

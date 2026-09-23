@@ -45,12 +45,14 @@ public partial class MarketBoardModule
         /// <summary>顶部「购买」的目标持有数量（记忆值）。</summary>
         public uint PurchaseQuantity = 1;
 
-        /// <summary>列表中直接购买的修饰键。</summary>
-
-        public bool AppendMarketStatsTooltip = true;
-
         /// <summary>是否输出诊断日志（默认关闭；排查问题时可在插件设置中开启）。</summary>
         public bool EnableDiagnostics;
+
+        /// <summary>
+        /// 「背包已满（或已达持有上限）导致停止购买」时是否弹出提醒。默认开启。
+        /// 关闭后仍会正常停止购买，只是不再弹红字提示（避免连续操作时反复刷屏）。
+        /// </summary>
+        public bool NotifyInventoryFull = true;
 
     }
 

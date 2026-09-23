@@ -1,3 +1,4 @@
+using DailyRoutines.Common.RemoteInteraction.Enums;
 using FFXIVAutoBuyer.Universalis;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using FFXIVClientStructs.FFXIV.Client.UI.Misc;
@@ -105,6 +106,13 @@ public unsafe partial class MarketBoardModule
         public bool IsLocalListingsStale => localListingsStale;
 
         /// <summary>
+        /// 当前物品的资料纪元：**每次更换物品 / 切换 HQ / 切换世界都会变**。
+        /// 用于「跟随游戏侧物品」的确认判据（见 <c>MarketBoard.UI.SyncItemWithGame</c>）：
+        /// 只有游戏侧确实显示过「我方当前这次所选物品」，之后游戏侧换成别的物品才可能是玩家自己改的。
+        /// </summary>
+        public int ItemEpoch => itemEpoch;
+
+        /// <summary>
         /// 暂停一切自动搜索（购买进行中由购买流程置为 true）。
         /// 目的：购买过程中绝不允许补拉/刷新发起市场搜索请求 ——
         /// 否则玩家会看到「购买时列表又刷新了一遍」。
@@ -136,8 +144,6 @@ public unsafe partial class MarketBoardModule
 
         private readonly Dictionary<(uint ItemID, uint WorldID), UniversalisMarketHistoryResponse> onlineHistoryCache       = [];
         private readonly Dictionary<(uint ItemID, uint WorldID), IDisposable>                      historySubscriptionCache = [];
-
-        private readonly Dictionary<(uint ItemID, string Scope), IDisposable> tooltipAggregatedSubscriptionCache = [];
 
         private readonly Dictionary<string, List<WorldPriceRow>> cachedDCWorldPrices = [];
         private          WorldPriceRanks?                        worldPriceRanks;
@@ -177,10 +183,38 @@ public unsafe partial class MarketBoardModule
 
         /// <summary>跨服后是否在等待「游戏布告板可用」的时刻（可用即立刻搜索，不再空等延迟）。</summary>
         private bool waitingBoardAfterWorldChange;
+
+        /// <summary>
+        /// 跨服（世界切换）后**尚未**为新世界发出过搜索请求。
+        /// <para>
+        /// 为什么需要它：跨服时 <c>InvalidateWorldData</c> 会清空游戏侧列表，但
+        /// <c>IsFullyReceived()</c> 对「<c>EntryCount == 0</c>」返回 **true** —— 即「一条数据都没有」
+        /// 也算「已完整接收」。若补拉逻辑据此提前判定「已成功」，新世界的列表就永远不会被取回，
+        /// 表现为「跨服判定成功，但在售列表不更新」。
+        /// </para>
+        /// 因此只要本标记为真，就不把当前游戏侧状态当作「补拉已完成」，必须先真正发出一次搜索；
+        /// 该标记在「搜索已下发 / 补拉结论已出（就绪、放弃、被拒）」时清除。
+        /// </summary>
+        private bool pendingWorldResyncSearch;
+
+        /// <summary>
+        /// 跨服后重搜索的下发时刻（<c>TickCount64</c>；0 表示没有待确认的重搜索）。
+        /// 用于在「新世界数据真正重建完成」时补一条始终输出的日志，让玩家能确认列表确实更新了。
+        /// </summary>
+        private long worldResyncSearchTick;
         private          string?                                 priceTableRegion;
         private          bool                                    priceTableHQOnly;
         private          bool                                    priceTableOnlyCurrentDC;
         private          bool                                    worldPriceTableDirty = true;
+
+        /// <summary>已就「开始取卡片数据」打过日志的物品（每个物品一条，避免逐帧刷屏）。</summary>
+        private uint priceCardLoggedItemID;
+
+        /// <summary>已就「卡片数据已就绪」打过日志的物品。</summary>
+        private uint priceCardReadyLoggedItemID;
+
+        /// <summary>已就「本物品本轮发起了多少个世界的行情请求」打过日志的物品。</summary>
+        private uint priceCardRequestLoggedItemID;
 
         private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), CachedValue<HistoryDataSet>>  historyDataCache  = [];
         private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), CachedValue<ListingsDataSet>> listingsDataCache = [];
@@ -224,8 +258,27 @@ public unsafe partial class MarketBoardModule
         /// <summary>最近一次本地市场搜索请求时刻（用于限流，避免连续刷新游戏列表）。</summary>
         private static long lastLocalSearchTick;
 
-        /// <summary>两次本地搜索请求的最小间隔（毫秒，全局不限物品）。</summary>
-        private const long LOCAL_SEARCH_MIN_INTERVAL_MS = 800;
+        /// <summary>
+        /// 两次本地搜索请求的最小间隔（毫秒，全局不限物品）。
+        /// <para>
+        /// 实测依据：改成 800ms 时，连续点选两个物品（两次请求相隔 826ms）会让游戏回以
+        /// 「请稍后再次确认」（错误码 1879048194/1879048195），随后该物品的数据要等整段冷却才可能补回。
+        /// 放宽到 2 秒可显著降低触发概率；被拦下的那次请求不会丢 —— <c>SelectItem</c> 会标记待补拉，
+        /// 由每秒 tick 在首个延迟（2.5s）后重新下发。
+        /// </para>
+        /// </summary>
+        private const long LOCAL_SEARCH_MIN_INTERVAL_MS = 2_000;
+
+        /// <summary>
+        /// 是否处于「服务器刚拒绝市场数据请求」的静默冷却中。
+        /// <para>
+        /// 冷却期内**不采信游戏侧数据**：被拒时客户端可能已被 `EndRequest()` 清空，
+        /// 而 <c>IsFullyReceived()</c> 对「空」会判为「已完整接收」——
+        /// 若据此认为数据就绪，就会以空列表收场并结束补拉，该物品的列表再也取不回来。
+        /// </para>
+        /// </summary>
+        private static bool IsMarketRejectionCoolingDown =>
+            Environment.TickCount64 < marketRejectionCooldownUntil;
 
         /// <summary>上一次请求在途时的最长等待时间（毫秒），超时后允许重新下发。</summary>
         private const long LOCAL_SEARCH_PENDING_WAIT_MS = 3_000;
@@ -263,20 +316,21 @@ public unsafe partial class MarketBoardModule
         private const long AGGREGATED_DATA_TTL_MS = 15 * 60 * 1000;
 
         /// <summary>
+        /// 世界行情**失败**后的重试间隔（毫秒）。与 <c>RemoteQueryCache</c> 的失败退避 / 失败 TTL（30 秒）对齐。
+        /// <para>
+        /// 实现方式：失败时把该 (物品, 世界) 的「已请求时刻」改写成
+        /// <c>now - AGGREGATED_DATA_TTL_MS + AGGREGATED_FAILURE_RETRY_DELAY_MS</c>，
+        /// 使其在 15 分钟 TTL 的判定下**只需再等 30 秒**就重新变为可请求 ——
+        /// 同时这一轮它仍算「已处理」，不会挤占 <see cref="MAX_AGGREGATED_WORLDS_PER_CALL"/> 配额而饿死后面的世界。
+        /// </para>
+        /// </summary>
+        private const long AGGREGATED_FAILURE_RETRY_DELAY_MS = 30_000;
+
+        /// <summary>
         /// 单次调用最多处理的「新请求」世界数：单一大区的世界数硬上限为 8，
         /// 因此一次调用即可覆盖整个大区；其余大区由每秒一次的 tick 继续补齐，避免请求风暴。
         /// </summary>
         private const int MAX_AGGREGATED_WORLDS_PER_CALL = 8;
-
-        /// <summary>
-        /// 请求刷新道具提示（限流）。
-        /// 选择一次物品会收到 28 个世界的回调，逐个触发会让单帧耗时超过 100ms（日志中的 HITCH）。
-        /// </summary>
-        private static void RequestTooltipDetailUpdate()
-        {
-            if (Throttler.Shared.Throttle("BetterMarketBoard-TooltipDetailUpdate", 500))
-                TooltipManager.Instance().TriggerItemDetailUpdate();
-        }
 
         /// <summary>最近窗口内的自动请求记录（熔断用）：(物品, 时刻)。</summary>
         private static readonly Queue<(uint ItemID, long Tick)> autoRequestTicks = [];
@@ -328,6 +382,37 @@ public unsafe partial class MarketBoardModule
 
             DLog.Warning($"[AutoBuyer][诊断] {message}{suffix}");
         }
+
+        /// <summary>
+        /// 跨服检测日志：**不受 <c>EnableDiagnostics</c> 影响，始终写入 /xllog**。
+        /// <para>
+        /// 原因：跨服（世界切换）检测只有「跨界传送日志判定」与「开窗校正」两条路，
+        /// 且事件稀疏（每次跨服一条）。若这两条路的日志被诊断开关吞掉，
+        /// 就完全无法判断「检测有没有读到日志、读到的是哪一条、走的是哪条路」——
+        /// 因此这里始终输出，代价可忽略。
+        /// </para>
+        /// 固定前缀 <c>[AutoBuyer][跨服]</c>：游戏内用 <c>/xllog</c> 过滤该前缀即可。
+        /// </summary>
+        public static void WorldLog
+        (
+            string message
+        ) =>
+            DLog.Warning($"[AutoBuyer][跨服] {message}");
+
+        /// <summary>
+        /// 行情数据日志：**不受 <c>EnableDiagnostics</c> 影响，始终写入 /xllog**。
+        /// <para>
+        /// 用途：跨世界行情（Universalis 聚合）取不到数据时，必须让玩家看得见原因与后续动作 ——
+        /// 否则界面只是「某几个世界没有价格」，无从判断是上游失败、被节流还是仍在重试。
+        /// 事件稀疏（每次失败一条），因此始终输出。
+        /// </para>
+        /// 固定前缀 <c>[AutoBuyer][数据]</c>。
+        /// </summary>
+        public static void DataLog
+        (
+            string message
+        ) =>
+            DLog.Warning($"[AutoBuyer][数据] {message}");
 
         /// <summary>自动请求熔断检查；返回 true 表示允许继续。</summary>
         private static bool PassAutoRequestBreaker
@@ -494,6 +579,8 @@ public unsafe partial class MarketBoardModule
         )
         {
             waitingBoardAfterWorldChange = true;
+            pendingWorldResyncSearch     = true;
+            worldResyncSearchTick        = 0;
 
             SelectedWorldID = CurrentWorldID;
 
@@ -604,16 +691,38 @@ public unsafe partial class MarketBoardModule
 
         /// <summary>
         /// 服务器拒绝了市场数据请求（游戏提示「请稍后再次确认」）。
-        /// 进入静默冷却并结束当前补拉，避免继续请求形成刷新循环。
+        /// <para>
+        /// 进入静默冷却，但**保留「待补拉」状态** —— 被拒只说明「这一刻不能请求」，
+        /// 不代表「这个物品不要了」。若在此结束补拉，该物品的列表会一直空着，
+        /// 直到玩家再次切换物品或手动刷新（实机反馈：连点两个物品后，第二个之后就再也取不到数据）。
+        /// </para>
+        /// 冷却结束后由每秒 tick 自动重试；冷却期间的请求由 <c>RequestLocalSearchData</c> 拦下，
+        /// 因此不会形成「请求 → 被拒 → 再请求」的刷新循环。
         /// </summary>
         public void NotifyMarketRequestRejected()
         {
+            var now = Environment.TickCount64;
+
             DiagLog($"服务器拒绝市场数据请求，进入 {MARKET_REJECTION_COOLDOWN_MS / 1000} 秒静默冷却");
 
-            marketRejectionCooldownUntil = Environment.TickCount64 + MARKET_REJECTION_COOLDOWN_MS;
-            localListingsStale           = false;
-            localSearchRetryAttempts     = 0;
-            localSearchNextRetryTick     = 0;
+            MarketDataProvider.DataLog
+            (
+                $"[布告板搜索] 服务器拒绝请求（请稍后再次确认）→ 静默 {MARKET_REJECTION_COOLDOWN_MS / 1000} 秒后自动重试"
+                + (SelectedItemID != 0 ? $"，当前物品 item={SelectedItemID}" : string.Empty)
+                + "；急用可点「刷新市场数据」立即重试"
+            );
+
+            marketRejectionCooldownUntil = now + MARKET_REJECTION_COOLDOWN_MS;
+
+            // 不结束补拉（不要置 localListingsStale = false），只把窗口与重试机会排到冷却之后
+            localSearchRetryAttempts = 0;
+            localSearchNextRetryTick = 0;
+            localSearchRetryDeadline = now + MARKET_REJECTION_COOLDOWN_MS + LOCAL_SEARCH_RETRY_TOTAL_MS;
+
+            if (pendingWorldResyncSearch)
+            {
+                MarketDataProvider.WorldLog("[列表] 跨服后的重搜索被服务器拒绝 → 冷却结束后自动重试");
+            }
         }
 
         /// <summary>
@@ -621,16 +730,33 @@ public unsafe partial class MarketBoardModule
         /// 策略：**单次获取 → 失败才重获取 → 成功即不再获取**。
         /// 成功以「游戏已完整返回当前物品的在售列表」为准（<c>IsFullyReceived</c>），
         /// 一旦成功立即结束补拉，之后不再重复请求，避免游戏列表被反复刷新。
+        /// <para>
+        /// 例外：<c>pendingWorldResyncSearch</c>（跨服后尚未为新世界下发搜索）为真时，
+        /// 「空数据」不能当作成功 —— 详见 <c>InfoProxyItemSearchExtension.IsFullyReceived</c> 的
+        /// <c>EntryCount == 0 =&gt; true</c> 分支。
+        /// </para>
         /// </summary>
         public void RetryLocalSearchIfStale()
         {
             // 购买进行中：不发起任何自动搜索（窗口顺延，等购买结束后再按需补拉）
             if (AutoSearchSuppressed)
             {
-                if (localListingsStale)
+                if (localListingsStale || pendingWorldResyncSearch)
                     localSearchRetryDeadline = Environment.TickCount64 + LOCAL_SEARCH_RETRY_TOTAL_MS;
 
                 return;
+            }
+
+            // 跨服后待重搜索：即使 stale 已被其它路径清掉（切换物品 / 手动刷新 / 切换世界后再切回），
+            // 也必须保证为新世界真正下发过一次搜索 —— 否则界面会一直卡在「等待重新取回列表」。
+            if (pendingWorldResyncSearch && !localListingsStale)
+            {
+                localListingsStale       = true;
+                localSearchRetryAttempts = 0;
+                localSearchNextRetryTick = 0;
+                localSearchRetryDeadline = Environment.TickCount64 + LOCAL_SEARCH_RETRY_TOTAL_MS;
+
+                DiagLog("跨服后待重搜索：恢复补拉状态（stale 曾被清除）");
             }
 
             if (!localListingsStale) return;
@@ -638,7 +764,15 @@ public unsafe partial class MarketBoardModule
             var info = InfoProxy;
 
             // 成功：数据已完整到达 → 结束补拉
-            if (info != null && info->SearchItemId == SelectedItemID && info->IsFullyReceived(SelectedItemID))
+            // ⚠ 两条例外：
+            //   ① 跨服后（pendingWorldResyncSearch）：刚清空的列表会被 IsFullyReceived 判为「已接收」
+            //      （EntryCount == 0 => true），在此结束补拉就永远不下发新世界的搜索；
+            //   ② 服务器刚拒绝过请求（冷却中）：客户端可能已被 EndRequest 清空，同样是「空 = 已接收」的假象。
+            if (!pendingWorldResyncSearch                                 &&
+                !IsMarketRejectionCoolingDown                            &&
+                info != null                                             &&
+                info->SearchItemId == SelectedItemID                     &&
+                info->IsFullyReceived(SelectedItemID))
             {
                 localListingsStale       = false;
                 localSearchRetryAttempts = 0;
@@ -647,7 +781,8 @@ public unsafe partial class MarketBoardModule
 
             if (SelectedItemID == 0 || !IsViewingCurrentWorld)
             {
-                localListingsStale = false;
+                localListingsStale       = false;
+                pendingWorldResyncSearch = false;
                 return;
             }
 
@@ -679,8 +814,21 @@ public unsafe partial class MarketBoardModule
 
             if (now > localSearchRetryDeadline)
             {
+                var wasWorldResync = pendingWorldResyncSearch;
+
                 DiagLog($"补拉窗口结束（未取到数据）item={SelectedItemID} 尝试={localSearchRetryAttempts}");
-                localListingsStale = false;
+
+                localListingsStale       = false;
+                pendingWorldResyncSearch = false;
+
+                if (wasWorldResync)
+                {
+                    MarketDataProvider.WorldLog
+                    (
+                        $"[列表] 跨服后补拉窗口结束，仍未取回新世界数据（item={SelectedItemID}，尝试={localSearchRetryAttempts}）→ 可手动刷新或切换物品"
+                    );
+                }
+
                 return;
             }
 
@@ -689,16 +837,68 @@ public unsafe partial class MarketBoardModule
             // 重获取次数用尽 → 放弃（等待玩家手动切物品/刷新）
             if (localSearchRetryAttempts >= LOCAL_SEARCH_RETRY_MAX_ATTEMPTS)
             {
-                localListingsStale = false;
+                var wasWorldResync = pendingWorldResyncSearch;
+
+                localListingsStale       = false;
+                pendingWorldResyncSearch = false;
+
+                if (wasWorldResync)
+                {
+                    MarketDataProvider.WorldLog
+                    (
+                        $"[列表] 跨服后补拉次数用尽，未能取回新世界数据（item={SelectedItemID}）→ 可手动刷新或切换物品"
+                    );
+                }
+
                 return;
             }
 
-            localSearchRetryAttempts++;
             localSearchNextRetryTick = now + LOCAL_SEARCH_RETRY_INTERVAL_MS;
 
-            DiagLog($"补拉重试 第 {localSearchRetryAttempts} 次 item={SelectedItemID}");
+            // 跨服后第一次可以搜索时，这次请求就是「为新世界重新取列表」的关键请求
+            var isWorldResyncSearch = pendingWorldResyncSearch;
 
-            RequestLocalSearchData(SelectedItemID, reason: "补拉重试");
+            var dispatched = RequestLocalSearchData
+            (
+                SelectedItemID,
+                reason: isWorldResyncSearch ?
+                            "跨服后重搜索" :
+                            "补拉重试"
+            );
+
+            // ⚠ 只有「真的下发成功」才消耗重试次数。
+            // 被冷却 / 节流 / 熔断 / 上一次在途跳过时都不计次 ——
+            // 否则服务器拒绝后的冷却期内几次空转就会把重试预算耗尽，
+            // 冷却结束后反而不再生效重试（又变成「取不到数据」）。
+            if (dispatched)
+                localSearchRetryAttempts++;
+
+            DiagLog
+            (
+                $"补拉第 {localSearchRetryAttempts} 次（本次{(dispatched ? "已下发" : "被跳过，不计次")}）item={SelectedItemID}"
+            );
+
+            if (isWorldResyncSearch)
+            {
+                if (dispatched)
+                {
+                    pendingWorldResyncSearch = false;
+                    worldResyncSearchTick    = Environment.TickCount64;
+
+                    MarketDataProvider.WorldLog
+                    (
+                        $"[列表] 跨服后已发起新世界搜索（item={SelectedItemID}，第 {localSearchRetryAttempts} 次）"
+                    );
+                }
+                else
+                {
+                    // 被节流 / 上一次在途 / 服务器繁忙：保持标记，下一轮继续尝试
+                    MarketDataProvider.WorldLog
+                    (
+                        $"[列表] 跨服后搜索未下发（被节流或在途），稍后重试 item={SelectedItemID}"
+                    );
+                }
+            }
         }
 
         public void AnchorRegion() =>
@@ -839,6 +1039,10 @@ public unsafe partial class MarketBoardModule
             bool hqOnly
         )
         {
+            // 后台静默：窗口未打开时不发起任何价格请求
+            if (!owner.IsPluginWindowOpen)
+                return;
+
             if (itemID == 0 || owner.allWorlds.Count == 0)
                 return;
 
@@ -943,7 +1147,6 @@ public unsafe partial class MarketBoardModule
             subscriptionCache.Clear();
             historySubscriptionCache.Clear();
             aggregatedSubscriptionCache.Clear();
-            tooltipAggregatedSubscriptionCache.Clear();
 
             // 注意：保留 onlineDataCache / onlineAggregatedCache / onlineHistoryCache。
             // 它们以 (物品, 世界) 为键、跨物品复用；若在此清空，每次切换物品都会重新向
@@ -1019,12 +1222,46 @@ public unsafe partial class MarketBoardModule
                 if (subscription != null)
                     subscription.Dispose();
             }
+        }
 
-            foreach (var subscription in tooltipAggregatedSubscriptionCache.Values)
+        /// <summary>
+        /// 该（物品 × 世界）的跨世界行情是否「本轮无需再处理」。
+        /// <para>
+        /// 判据（关键：**只有真的持有数据才享受 15 分钟 TTL**）：
+        /// <list type="number">
+        /// <item>已持有数据（<c>onlineAggregatedCache</c>）→ 15 分钟内不重取；</item>
+        /// <item>未持有数据，但上游缓存里已有含该物品的响应（说明我们只是**错过了回调**，
+        ///       例如切换物品时 <c>ClearAllData</c> 把所有订阅 Dispose 掉了）→ **不等待**，
+        ///       立即重新订阅即可把数据采纳进来（不会产生网络请求）；</item>
+        /// <item>其余（真失败 / 上游 <c>failedItems</c> / 仍在途）→ 最多等
+        ///       <see cref="AGGREGATED_FAILURE_RETRY_DELAY_MS"/> 再重试。</item>
+        /// </list>
+        /// 旧实现只看「最近是否请求过」，于是「请求发出但响应无人接收」会与「已有数据」被同等对待，
+        /// 把该世界的价格锁死 15 分钟 —— 即实机反馈的「连点多个物品后前几个永远取不到」。
+        /// </para>
+        /// </summary>
+        private bool IsAggregatedWorldFresh
+        (
+            (uint ItemID, uint WorldID) key,
+            uint                        itemID,
+            string                      worldName
+        )
+        {
+            var now = Environment.TickCount64;
+
+            if (onlineAggregatedCache.ContainsKey(key))
             {
-                if (subscription != null)
-                    subscription.Dispose();
+                return aggregatedRequestTicks.TryGetValue(key, out var dataTick) &&
+                       now - dataTick < AGGREGATED_DATA_TTL_MS;
             }
+
+            if (RemoteUniversalisAggregatedMarket.TryGet([itemID], worldName, out var snapshot) &&
+                snapshot.HasValue                                        &&
+                snapshot.Value.Results.Any(result => result.ItemID == itemID))
+                return false;   // 上游已有该物品数据 → 立刻重新订阅采纳
+
+            return aggregatedRequestTicks.TryGetValue(key, out var requestTick) &&
+                   now - requestTick < AGGREGATED_FAILURE_RETRY_DELAY_MS;
         }
 
         private bool RequestAllWorldsData
@@ -1034,6 +1271,9 @@ public unsafe partial class MarketBoardModule
             bool    hqOnly     = false
         )
         {
+            // 后台静默：窗口未打开时不向 Universalis 发起任何请求
+            if (!owner.IsPluginWindowOpen) return false;
+
             if (owner.allWorlds.Count == 0) return false;
 
             Dictionary<string, Dictionary<uint, string>>? targetRegion = null;
@@ -1073,6 +1313,7 @@ public unsafe partial class MarketBoardModule
             // 其余交给每秒一次的 tick（EnsurePriceData）逐步补齐，
             // 避免启动/跨服瞬间 28 个请求并发触发 Universalis 429。
             var processedWorlds = 0;
+            var skippedWorlds   = 0;
 
             // 注意：必须「从上次中断的位置继续」，否则每轮都只处理排在最前的几个世界，
             // 排在末尾的世界（例如陆行鸟的 沃仙曦染 / 晨曦王座）将永远拿不到价格数据。
@@ -1086,10 +1327,14 @@ public unsafe partial class MarketBoardModule
 
                 var aggregatedCacheKey = (itemID, worldID);
 
-                // 已请求过且仍在有效期内 → 不消耗本轮配额，让后面的世界有机会被处理
-                if (aggregatedRequestTicks.TryGetValue(aggregatedCacheKey, out var lastRequestTick) &&
-                    Environment.TickCount64 - lastRequestTick < AGGREGATED_DATA_TTL_MS)
+                // 「最近取过」不等于「已有数据」——
+                // 切换物品会 Dispose 全部订阅，晚到的响应没人接、`onlineAggregatedCache` 仍为空，
+                // 若此时还按 15 分钟 TTL 跳过，该世界的价格就被锁死（实机：连点六个后前几个取不到）。
+                if (IsAggregatedWorldFresh(aggregatedCacheKey, itemID, worldName))
+                {
+                    skippedWorlds++;
                     continue;
+                }
 
                 if (processedWorlds >= MAX_AGGREGATED_WORLDS_PER_CALL)
                     break; // 本轮配额用完，下一次 tick 继续
@@ -1110,11 +1355,78 @@ public unsafe partial class MarketBoardModule
                             if (epoch != itemEpoch)
                                 return;
 
+                            // 失败：把该 (物品, 世界) 的「已请求时刻」推迟到「再等 30 秒即可重试」，
+                            // 而不是直接删标记 —— 删了会被下一轮立刻重新标记，于是又被锁 15 分钟。
+                            // 不处理的后果正是「部分物品后续无法正常获取同大区数据」：那几次失败
+                            // 被当成「15 分钟内已取过」，该世界的价格一直缺，连手动刷新也不会补。
+                            // （真正的网络重试节流由 RemoteQueryCache 的失败退避负责，不会打爆上游。）
+                            if (snapshot.Status == RemoteSnapshotStatus.Failed)
+                            {
+                                var nowTick = Environment.TickCount64;
+
+                                // 上游明确表示「没有这个世界的这个物品」（404 / 400）→ 属永久性缺失，
+                                // 按正常 TTL 对待，不必反复重试；其余失败（429 / 5xx / 超时 / 网络）
+                                // 视为可恢复 → 30 秒后自动重试。
+                                var isPermanentMiss = snapshot.Error is HttpRequestException
+                                {
+                                    StatusCode: System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.BadRequest
+                                };
+
+                                var retryDelay = isPermanentMiss ?
+                                                     AGGREGATED_DATA_TTL_MS :
+                                                     AGGREGATED_FAILURE_RETRY_DELAY_MS;
+
+                                // 只在这条失败「首次」被处理时打日志（已安排过重试的标记不会再触发）
+                                var isFirstHandling =
+                                    aggregatedRequestTicks.TryGetValue(aggregatedCacheKey, out var lastTick) &&
+                                    nowTick - lastTick < AGGREGATED_DATA_TTL_MS - AGGREGATED_FAILURE_RETRY_DELAY_MS;
+
+                                aggregatedRequestTicks[aggregatedCacheKey] =
+                                    nowTick - AGGREGATED_DATA_TTL_MS + retryDelay;
+
+                                if (isFirstHandling)
+                                {
+                                    MarketDataProvider.DataLog
+                                    (
+                                        isPermanentMiss ?
+                                            $"[世界行情] 上游无该数据（不再重试）：world={worldID}（{worldName}）item={itemID}" :
+                                            $"[世界行情] 获取失败，{AGGREGATED_FAILURE_RETRY_DELAY_MS / 1000} 秒后自动重试：world={worldID}（{worldName}）item={itemID}"
+                                    );
+                                }
+
+                                return;
+                            }
+
                             if (!snapshot.HasValue || snapshot.Value is not { } data)
                                 return;
 
+                            // Universalis 聚合接口对「本次没算出来」的物品会给空 results + failedItems 列出该物品，
+                            // 这不是「该世界没有这个物品」，而是**上游这次失败**。
+                            // 必须当作失败处理（30 秒后可重试），否则 15 分钟的「已取过」标记会把该世界的价格锁死 ——
+                            // 界面表现为「上方的低价/高价卡片缺数据」，而且没有任何日志（实机反馈的现象）。
                             if (data.Results.All(x => x.ItemID != itemID))
+                            {
+                                var nowTick = Environment.TickCount64;
+
+                                var isFirstHandling =
+                                    aggregatedRequestTicks.TryGetValue(aggregatedCacheKey, out var lastTick) &&
+                                    nowTick - lastTick < AGGREGATED_DATA_TTL_MS - AGGREGATED_FAILURE_RETRY_DELAY_MS;
+
+                                aggregatedRequestTicks[aggregatedCacheKey] =
+                                    nowTick - AGGREGATED_DATA_TTL_MS + AGGREGATED_FAILURE_RETRY_DELAY_MS;
+
+                                if (isFirstHandling)
+                                {
+                                    var failedFlag = data.FailedItems.Contains(itemID) ? "failedItems" : "空结果";
+
+                                    MarketDataProvider.DataLog
+                                    (
+                                        $"[世界行情] 上游未返回该物品数据（{failedFlag}），{AGGREGATED_FAILURE_RETRY_DELAY_MS / 1000} 秒后自动重试：world={worldID}（{worldName}）item={itemID}"
+                                    );
+                                }
+
                                 return;
+                            }
 
                             // 仅当该世界的最低报价真的变化时才重建卡表：
                             // 否则跨服/启动时 28 个世界的数据陆续到达会让卡片区反复重排。
@@ -1131,13 +1443,24 @@ public unsafe partial class MarketBoardModule
 
                                 worldPriceTableDirty = true;
                             }
-
-                            RequestTooltipDetailUpdate();
                         }
                     );
 
                     result = true;
                 }
+            }
+
+            // 常开可观测性（每个物品一条）：本轮实际为多少个世界发起了行情请求、多少个被 15 分钟 TTL 跳过。
+            // 用途：卡片缺数据时判断「请求是否发出去了」。
+            if (itemID != 0 && priceCardRequestLoggedItemID != itemID)
+            {
+                priceCardRequestLoggedItemID = itemID;
+
+                MarketDataProvider.DataLog
+                (
+                    $"[世界行情] item={itemID} 本轮发起 {processedWorlds} 个世界的请求"
+                    + $"（{dcsToProcess.Count} 个数据中心；{skippedWorlds} 个世界在 15 分钟有效期内被跳过）"
+                );
             }
 
             var selectedWorldName = targetRegion.Values.SelectMany(static dc => dc)
@@ -1158,8 +1481,16 @@ public unsafe partial class MarketBoardModule
                 _ = RemoteUniversalisMarket.GetOrRequest([itemID], selectedWorldName, marketParam);
             }
 
-            if (!localDataAvailable && !subscriptionCache.ContainsKey(marketCacheKey))
+            // 与跨世界行情同理：**未持有该（物品 × 世界）的挂牌数据时，即便订阅表里已有条目也要重新订阅** ——
+            // 旧订阅可能已因「切换物品 → ClearAllData → DisposeAllSubscriptions」被摘除，
+            // 晚到的响应无人接收，而订阅表（若未被清理）会让我们误以为已经订阅过。
+            if (!localDataAvailable                                          &&
+                (!subscriptionCache.ContainsKey(marketCacheKey)              ||
+                 !onlineDataCache.ContainsKey(marketCacheKey)))
             {
+                if (subscriptionCache.Remove(marketCacheKey, out var staleSubscription))
+                    staleSubscription.Dispose();
+
                 subscriptionCache[marketCacheKey] = RemoteUniversalisMarket.Observe
                 (
                     [itemID],
@@ -1177,7 +1508,6 @@ public unsafe partial class MarketBoardModule
 
                         onlineDataCache[marketCacheKey] = data;
                         onlineDataVersion++;
-                        RequestTooltipDetailUpdate();
                     },
                     marketParam
                 );
@@ -1374,20 +1704,50 @@ public unsafe partial class MarketBoardModule
         {
             // 先推进「世界数据是否可用」的状态机：否则跨服后可能因提前 return
             // 而永远观察不到「未就绪 → 到齐」，导致列表一直不显示。
-            var gameDataUsable = IsGameMarketDataUsable(info->SearchItemId);
+            // 注意：跨服后的「尚未下发重搜索」阶段必须视为**不可用** —— 此时游戏侧可能处于
+            // 清空状态，而 IsFullyReceived() 对 EntryCount == 0 返回 true（空 = 已完整接收），
+            // 若当成可用数据，界面会以空列表收场、补拉同时被取消，新世界的列表就再也取不回来。
+            var gameDataUsable = IsGameMarketDataUsable(info->SearchItemId) &&
+                                 !pendingWorldResyncSearch                   &&
+                                 !IsMarketRejectionCoolingDown;
 
-            if (localListingsStale)
+            if (localListingsStale && !gameDataUsable)
             {
                 var currentState = (info->SearchItemId, info->EntryCount, info->ListingCount);
 
-                if (currentState == localListingsBaseline && !gameDataUsable)
+                if (currentState == localListingsBaseline)
                 {
                     DiagLog($"本地列表为空返回（等待新数据）item={info->SearchItemId} 基线={localListingsBaseline}");
                     return EmptyLocalListings();
                 }
 
-                localListingsStale       = false;
-                localSearchRetryAttempts = 0;
+                if (pendingWorldResyncSearch)
+                {
+                    // 跨服后进行中：保持待补拉状态，等 1 秒 tick 的补拉机制真正下发新搜索
+                    DiagLog
+                    (
+                        $"跨服后等待重新取回列表 item={info->SearchItemId} 条目={info->EntryCount}/{info->ListingCount}（尚未下发重搜索）"
+                    );
+
+                    return EmptyLocalListings();
+                }
+
+                // ⚠ 这里**不要**改写 localListingsStale。
+                // 补拉状态只能由补拉机制自己管理（成功取到数据 / 窗口结束 / 次数用尽 / 被服务器拒绝后的冷却重试）；
+                // 界面一旦在「游戏侧状态变化」时把它清掉，曾经被服务器拒绝过的物品就再也不会重试 ——
+                // 实机反馈「连点两个物品后，第二个之后就取不到数据」正是这样发生的。
+                if (localListingsData != null)
+                {
+                    DiagLog($"本地列表暂未接收完整，沿用上一次数据 item={info->SearchItemId}（补拉继续）");
+                    return localListingsData;
+                }
+
+                DiagLog
+                (
+                    $"本地列表为空返回（游戏数据未接收完，补拉继续）item={info->SearchItemId} 条目={info->EntryCount}/{info->ListingCount}"
+                );
+
+                return EmptyLocalListings();
             }
 
             if (!gameDataUsable)
@@ -1414,7 +1774,13 @@ public unsafe partial class MarketBoardModule
             var contentHash    = CalculateLocalListingsHash(sourceListings);
             var fingerprint    = (itemEpoch, info->SearchItemId, HQOnly, info->ListingCount, contentHash, locallyPurchasedVersion);
             if (localListingsData != null && localListingsFingerprint == fingerprint)
+            {
+                // 数据与上一次完全一致 → 就是「已就绪」：在此结束补拉（补拉状态的唯一成功出口之一）
+                localListingsStale       = false;
+                localSearchRetryAttempts = 0;
+
                 return localListingsData;
+            }
 
             DiagLog($"本地列表重建 item={info->SearchItemId} HQ={HQOnly} 条目={info->ListingCount} 哈希={contentHash}");
 
@@ -1422,6 +1788,24 @@ public unsafe partial class MarketBoardModule
             localListingsData        = BuildLocalListingsDataSet(info->SearchItemId, sourceListings);
             worldPriceTableDirty     = true;
             pendingImplicitRefresh   = false;
+
+            // 成功取回并采纳了本物品的数据 → 补拉完成（此后不再重复请求，避免游戏列表被反复刷新）
+            localListingsStale       = false;
+            localSearchRetryAttempts = 0;
+
+            // 跨服后重建成功 → 补一条始终输出的日志，确认「列表确实已更新为新世界的数据」
+            if (worldResyncSearchTick != 0)
+            {
+                var elapsed = Environment.TickCount64 - worldResyncSearchTick;
+
+                worldResyncSearchTick = 0;
+
+                MarketDataProvider.WorldLog
+                (
+                    $"[列表] 跨服后新世界数据已就绪：重建 {localListingsData.TotalCount} 条（item={info->SearchItemId}，距下发搜索 {elapsed} ms）"
+                );
+            }
+
             return localListingsData;
         }
 
@@ -1643,6 +2027,34 @@ public unsafe partial class MarketBoardModule
 
                 worldPriceRanks      = BuildWorldPriceRanks();
                 worldPriceTableDirty = false;
+
+                // 常开可观测性（每个物品最多两条）：
+                // ① 切换物品时的「重建」状态 —— 说明本物品的卡片数据来源里各有多少；
+                // ② 数据首次就绪 —— 说明卡片确实拿到了内容。
+                // 目的：卡片缺数据时能一眼看出是「请求没发出 / 上游没给 / 采纳失败」，不必再靠猜。
+                var validWorldCount      = worldPriceRanks?.Valid.Count ?? 0;
+                var aggregatedWorldCount = onlineAggregatedCache.Keys.Count(key => key.ItemID == itemID);
+                var gamePriceWorldCount  = gameMinPriceCache.Keys.Count(key => key.ItemID == itemID);
+
+                if (itemID != 0 && priceCardLoggedItemID != itemID)
+                {
+                    priceCardLoggedItemID = itemID;
+
+                    MarketDataProvider.DataLog
+                    (
+                        $"[价格卡片] item={itemID} 重建：有效世界 {validWorldCount}/{cachedDCWorldPrices.Sum(dc => dc.Value.Count)}"
+                        + $"（聚合缓存 {aggregatedWorldCount} 个世界，服务器价缓存 {gamePriceWorldCount} 个世界）"
+                    );
+                }
+                else if (itemID != 0 && validWorldCount > 0 && priceCardReadyLoggedItemID != itemID)
+                {
+                    priceCardReadyLoggedItemID = itemID;
+
+                    MarketDataProvider.DataLog
+                    (
+                        $"[价格卡片] item={itemID} 数据已就绪：有效世界 {validWorldCount}（聚合缓存 {aggregatedWorldCount} 个世界）"
+                    );
+                }
             }
 
             return worldPriceRanks;
@@ -1906,42 +2318,6 @@ public unsafe partial class MarketBoardModule
 
             npcGilPriceCache[itemID] = price;
             return price;
-        }
-
-        public bool RequestTooltipAggregatedScope
-        (
-            uint   itemID,
-            string scope
-        )
-        {
-            if (string.IsNullOrWhiteSpace(scope))
-                return false;
-
-            var cacheKey = (itemID, scope);
-
-            _ = RemoteUniversalisAggregatedMarket.GetOrRequest([itemID], scope);
-            if (tooltipAggregatedSubscriptionCache.ContainsKey(cacheKey))
-                return false;
-
-            var epoch = itemEpoch;
-
-            tooltipAggregatedSubscriptionCache[cacheKey] = RemoteUniversalisAggregatedMarket.Observe
-            (
-                [itemID],
-                scope,
-                snapshot =>
-                {
-                    if (epoch != itemEpoch)
-                        return;
-
-                    if (!snapshot.HasValue)
-                        return;
-
-                    TooltipManager.Instance().TriggerItemDetailUpdate();
-                }
-            );
-
-            return true;
         }
 
         #endregion

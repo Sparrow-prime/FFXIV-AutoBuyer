@@ -53,7 +53,7 @@ public unsafe partial class MarketBoardModule : ModuleBase
     /// 为什么不直接用 <c>GameState.CurrentWorld</c>：它取自大厅数据（LobbyData），
     /// 会在过场开始时就变化、也可能根本不随跨界传送变化 —— 一旦与真实世界不一致，
     /// 检测不会触发、世界锚点也会写错，表现为「一直显示上一服务器的数据」。
-    /// 因此全插件（数据层 / 购买 / 卡片高亮 / Tooltip / UI 帧）的「当前世界」判定统一以此为准。
+    /// 因此全插件（数据层 / 购买 / 卡片高亮 / UI 帧）的「当前世界」判定统一以此为准。
     /// </para>
     /// </summary>
     private static uint CurrentWorldID { get; set; }
@@ -135,6 +135,10 @@ public unsafe partial class MarketBoardModule : ModuleBase
         TaskHelper.Enqueue
         (() =>
             {
+                // 后台静默：窗口未打开时不发起任何请求（等开窗后再补；期间本任务按 500ms 轮询等待）
+                if (!IsPluginWindowOpen)
+                    return false;
+
                 _ = RemoteUniversalisCatalog.GetDataCentersOrRequest();
                 _ = RemoteUniversalisCatalog.GetWorldsOrRequest();
 
@@ -176,7 +180,8 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
         GameState.Instance().MarketListingsStuck += OnMarketListingsStuck;
 
-        TooltipManager.Instance().RegItem(OnItemTooltipUpdate);
+        // 不注册道具工具提示（TooltipManager 已在 Plugin 初始化时禁用）：
+        // 既不给提示框追加市场数据，也不会因它而在日志里出现 [TooltipManager] 冗长行。
 
         // Lifestream IPC（可选依赖）：仅在玩家右键世界卡片请求传送时使用
         lifestreamChangeWorldById = DService.Instance().PI.GetIpcSubscriber<uint, bool>("Lifestream.ChangeWorldById");
@@ -185,7 +190,6 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
     protected override void Uninit()
     {
-        TooltipManager.Instance().Unreg(OnItemTooltipUpdate);
         FrameworkManager.Instance().Unreg(OnWorldWatch);
         LogMessageManager.Instance().Unreg(OnWorldVisitLogMessage);
 
@@ -401,7 +405,9 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
         // ── 通信最小化：只在布告板窗口正在显示时才做任何自动请求 ──
         // 目的：减少与游戏服务器 / Universalis 的通信，避免被判定为脚本或滥用。
-        var isOverlayOpen = Overlay is { IsOpen: true };
+        // 窗口判据统一取 IsPluginWindowOpen（与跨界传送日志监测、数据层请求闸门同源，
+        // 避免「同一含义两处判据」在后续改动中走偏）。
+        var isOverlayOpen = IsPluginWindowOpen;
 
         if (isOverlayOpen && !wasOverlayOpen)
         {
@@ -429,11 +435,15 @@ public unsafe partial class MarketBoardModule : ModuleBase
     }
 
     /// <summary>
-    /// 跨界传送判定（**仅在插件窗口打开时监测**）。
+    /// 【新路】跨界传送判定：监听游戏日志「使用跨界传送移动到了xxx。」。
     /// <para>
-    /// 游戏日志出现「使用跨界传送移动到了xxx。」表示玩家**已经落地新世界**，
-    /// 因此当帧立刻作废旧世界数据并重同步，不做任何去抖/延迟等待。
+    /// 该行只在玩家**已经落地新世界**后出现，因此命中即可当帧处理，不做去抖/延迟等待。
     /// 除服务器名外该文案没有其它变体，故只按固定前缀匹配。
+    /// </para>
+    /// <para>
+    /// **仅在插件窗口打开时监测**（与「后台静默」「通信最小化」一致）；窗口关闭期间读到
+    /// 的跨界传送日志会被记为「跳过」，并由开窗时的老路（<see cref="SyncWorldOnWindowOpen"/>）兜底。
+    /// 命中与否、读到哪一条、世界名解析走了哪条来源，**始终**写入日志（不受诊断开关影响）。
     /// </para>
     /// </summary>
     private void OnWorldVisitLogMessage
@@ -442,38 +452,70 @@ public unsafe partial class MarketBoardModule : ModuleBase
         LogMessageQueueItem item
     )
     {
-        if (!IsWorldVisitMonitoringActive()) return;
-
         // 快路径：先按 LogMessage 行号过滤（模板含固定文案的行），未命中则不看文本
         if (worldVisitLogMessageIDs.Count > 0 && !worldVisitLogMessageIDs.Contains(logMessageID)) return;
 
-        if (!TryParseWorldVisitWorldName(item.ToReadOnlySeString().ToString(), out var worldName))
-            return;
+        var text = item.ToReadOnlySeString().ToString();
 
-        var worldID = ResolveWorldIDByName(worldName);
+        // 行号命中模板，但文本里没有固定前缀（模板行可能被复用给别的文案）→ 只记录、不处理
+        if (!TryParseWorldVisitWorldName(text, out var worldName))
+        {
+            if (worldVisitLogMessageIDs.Contains(logMessageID))
+            {
+                MarketDataProvider.WorldLog
+                (
+                    $"[新路·日志判定] id={logMessageID} 命中模板但文本不含固定前缀，忽略：\"{(text.Length > 60 ? text[..60] + "…" : text)}\""
+                );
+            }
+
+            return;
+        }
+
+        var worldID = ResolveWorldIDByName(worldName, out var source);
+
+        string resolved;
 
         if (worldID == 0)
         {
             // 世界名未识别：退到「玩家实际所在世界」（角色结构体 → 大厅数据）
-            worldID = ResolvePlayerWorldID();
+            worldID = ResolvePlayerWorldID(out var playerSource);
 
-            MarketDataProvider.DiagLog($"跨界传送日志命中但世界名未识别：\"{worldName}\"，改用玩家当前世界 {worldID}");
+            resolved = $"世界名未识别 → 改用玩家实际所在世界 {worldID}（来源={playerSource}）";
         }
+        else
+            resolved = $"{worldID}（来源={source}）";
 
-        if (worldID == 0) return;
+        var monitoring = IsWorldVisitMonitoringActive();
 
-        HandleWorldChange(worldID, worldName, $"跨界传送日志（{logMessageID}）");
+        MarketDataProvider.WorldLog
+        (
+            $"[新路·日志判定] 读到跨界传送日志 id={logMessageID}，世界名=\"{worldName}\"，解析={resolved}，"
+            + $"当前世界锚点={CurrentWorldID}，窗口{(monitoring ? "已打开 → 按跨服处理" : "未打开 → 跳过（开窗时由老路校正兜底）")}"
+        );
+
+        if (!monitoring || worldID == 0) return;
+
+        HandleWorldChange(worldID, worldName, $"跨界传送日志（id={logMessageID}）");
     }
 
     /// <summary>
-    /// 窗口打开时校正世界：窗口关闭期间玩家可能已经跨服（此时不监测日志）。
+    /// 【老路】窗口打开时校正世界：窗口关闭期间玩家可能已经跨服（此时不监测日志）。
     /// 以角色结构体的当前世界为准（落地后即更新），发现不同即按跨服处理。
+    /// 结果**始终**写入日志，便于与新路（<see cref="OnWorldVisitLogMessage"/>）对照排查。
     /// </summary>
     private void SyncWorldOnWindowOpen()
     {
-        var worldID = ResolvePlayerWorldID();
+        var worldID = ResolvePlayerWorldID(out var source);
 
-        if (worldID == 0 || worldID == CurrentWorldID) return;
+        var changed = worldID != 0 && worldID != CurrentWorldID;
+
+        MarketDataProvider.WorldLog
+        (
+            $"[老路·开窗校正] 玩家实际所在世界={worldID}（来源={source}），当前世界锚点={CurrentWorldID}"
+            + (changed ? " → 不一致，按跨服处理" : " → 一致，无需变更")
+        );
+
+        if (!changed) return;
 
         HandleWorldChange(worldID, LuminaWrapper.GetWorldName(worldID), "开窗校正");
     }
@@ -492,7 +534,7 @@ public unsafe partial class MarketBoardModule : ModuleBase
         var previous = CurrentWorldID;
         CurrentWorldID = worldID;
 
-        MarketDataProvider.DiagLog($"世界切换：{previous} → {worldID}（{worldName}）reason={reason}");
+        MarketDataProvider.WorldLog($"[世界切换] {previous} → {worldID}（{worldName}），触发来源：{reason}");
 
         provider.InvalidateWorldData(reason);
         provider.ResyncAfterWorldChange();

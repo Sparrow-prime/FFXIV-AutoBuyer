@@ -379,12 +379,17 @@ public unsafe partial class MarketBoardModule
             }
 
             if (Environment.TickCount64 - purchaseWaitStart > PURCHASE_WAIT_MS)
+            {
+                var inventoryFull = IsUnableToReceiveItem(purchaseItemID);
+
                 FinishPurchase
                 (
-                    IsUnableToReceiveItem(purchaseItemID) ?
+                    inventoryFull ?
                         Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull") :
-                        Lang.Get("BetterMarketBoard-Purchase-Timeout")
+                        Lang.Get("BetterMarketBoard-Purchase-Timeout"),
+                    inventoryFull
                 );
+            }
 
             return !isPurchasing;
         }
@@ -396,7 +401,7 @@ public unsafe partial class MarketBoardModule
         // 3) 确实收不下 → 立即停止（不发出版本注定失败的请求，玩家立刻看到提示）
         if (IsUnableToReceiveItem(purchaseItemID))
         {
-            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"));
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"), inventoryFull: true);
             return true;
         }
 
@@ -418,7 +423,7 @@ public unsafe partial class MarketBoardModule
                 $"水晶类超上限：持有 {heldCount} + 本单 {firstListing.Value.Quantity} > {CRYSTAL_STACK_LIMIT}，直接判失败"
             );
 
-            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-StackLimit"));
+            FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-StackLimit"), inventoryFull: true);
             return true;
         }
 
@@ -442,10 +447,15 @@ public unsafe partial class MarketBoardModule
         return !isPurchasing;
     }
 
-    /// <summary>结束购买任务并给出结果提示。</summary>
+    /// <summary>
+    /// 结束购买任务并给出结果提示。
+    /// <paramref name="inventoryFull"/> 为 true 表示本次停止的原因是「收不下 / 已达持有上限」，
+    /// 此类提示可由配置项 <c>NotifyInventoryFull</c> 关闭（见 <c>MarketBoard.UI.ConfigUI</c>）。
+    /// </summary>
     private void FinishPurchase
     (
-        string? failureReason
+        string? failureReason,
+        bool    inventoryFull = false
     )
     {
         var wasPurchasing = isPurchasing;
@@ -469,6 +479,11 @@ public unsafe partial class MarketBoardModule
             (
                 Lang.Get("BetterMarketBoard-Purchase-Success", boughtCount, heldCount)
             );
+        }
+        else if (inventoryFull && !config.NotifyInventoryFull)
+        {
+            // 玩家关掉了「背包已满」提醒：静默停止，只留一行诊断日志（开启诊断时可见）
+            MarketDataProvider.DiagLog($"背包已满 / 达上限导致停止购买（提醒已在设置中关闭）：{failureReason}");
         }
         else
         {

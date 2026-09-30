@@ -64,9 +64,6 @@ public sealed class UniversalisMarketItemData
     [JsonPropertyName("listings")]
     public List<UniversalisMarketListing>? Listings { get; init; }
 
-    [JsonPropertyName("recentHistory")]
-    public List<UniversalisHistorySale>? RecentHistory { get; init; }
-
     /// <summary>数据最后上传时间（UTC）。</summary>
     public DateTime GetLastUploadTime() =>
         DateTimeOffset.FromUnixTimeMilliseconds(LastUploadTime).UtcDateTime;
@@ -160,89 +157,6 @@ public sealed class UniversalisMarketDataResponse
     /// <summary>数据最后上传时间（UTC）。</summary>
     public DateTime GetLastUploadTime() =>
         Items.Values.Select(x => x.GetLastUploadTime()).DefaultIfEmpty(DateTime.MinValue).Max();
-}
-
-#endregion
-
-#region 历史成交
-
-/// <summary>
-/// 历史成交条目（Universalis <c>MinimizedSaleView</c>）。
-/// </summary>
-public sealed class UniversalisHistorySale
-{
-    [JsonPropertyName("hq")]
-    public bool HQ { get; init; }
-
-    [JsonPropertyName("pricePerUnit")]
-    public ulong PricePerUnit { get; init; }
-
-    [JsonPropertyName("quantity")]
-    public uint Quantity { get; init; }
-
-    [JsonPropertyName("onMannequin")]
-    public bool OnMannequin { get; init; }
-
-    [JsonPropertyName("buyerName")]
-    public string? BuyerName { get; init; }
-
-    /// <summary>成交时间（秒时间戳）。</summary>
-    [JsonPropertyName("timestamp")]
-    public long Timestamp { get; init; }
-
-    public DateTime GetSaleTime() =>
-        DateTimeOffset.FromUnixTimeSeconds(Timestamp).UtcDateTime;
-}
-
-/// <summary>
-/// 单个物品的历史成交数据（Universalis V2 <c>HistoryView</c>）。
-/// </summary>
-public sealed class UniversalisHistoryItemData
-{
-    [JsonPropertyName("itemID")]
-    public uint ItemID { get; init; }
-
-    [JsonPropertyName("worldID")]
-    public uint? WorldID { get; init; }
-
-    [JsonPropertyName("worldName")]
-    public string? WorldName { get; init; }
-
-    [JsonPropertyName("dcName")]
-    public string? DcName { get; init; }
-
-    [JsonPropertyName("regionName")]
-    public string? RegionName { get; init; }
-
-    [JsonPropertyName("lastUploadTime")]
-    public long LastUploadTime { get; init; }
-
-    [JsonPropertyName("entries")]
-    public List<UniversalisHistorySale>? Entries { get; init; }
-}
-
-/// <summary>
-/// 多物品历史成交响应（本客户端对单物品请求同样归一化为该形态）。
-/// </summary>
-public sealed class UniversalisMarketHistoryResponse
-{
-    [JsonPropertyName("items")]
-    public Dictionary<uint, UniversalisHistoryItemData> Items { get; init; } = [];
-
-    [JsonPropertyName("worldID")]
-    public uint? WorldIDRaw { get; init; }
-
-    [JsonPropertyName("worldName")]
-    public string? WorldName { get; init; }
-
-    [JsonPropertyName("dcName")]
-    public string? DcName { get; init; }
-
-    [JsonPropertyName("regionName")]
-    public string? RegionName { get; init; }
-
-    public uint WorldID =>
-        WorldIDRaw ?? Items.Values.Select(x => x.WorldID).FirstOrDefault(x => x is > 0) ?? 0;
 }
 
 #endregion
@@ -400,17 +314,6 @@ public sealed class UniversalisMarketDataRequestParams
     public long? StatsWithin { get; init; }
 
     /// <summary>历史条目时间窗口（毫秒）。</summary>
-    public long? EntriesWithin { get; init; }
-}
-
-public sealed class UniversalisMarketHistoryRequestParams
-{
-    public bool? HQ { get; init; }
-
-    public int? EntriesToReturn { get; init; }
-
-    public long? StatsWithin { get; init; }
-
     public long? EntriesWithin { get; init; }
 }
 

@@ -310,38 +310,8 @@ public unsafe partial class MarketBoardModule
 
             ImGui.TableNextColumn();
 
-            using (ImRaii.Disabled(isOwnRetainer))
-                ImGui.Selectable($"{totalPrice.ToGilString()}\ue049", false, ImGuiSelectableFlags.SpanAllColumns);
-
-            if (!isOwnRetainer)
-            {
-                using var popup = ImRaii.ContextPopupItem($"ExecuteBuyPopup_{listing.ListingId}");
-
-                if (popup)
-                {
-                    ImGui.TextUnformatted($"{LuminaWrapper.GetAddonText(357)}:");
-
-                    ImGui.SameLine();
-                    ImGui.TextColored(KnownColor.LightSkyBlue.ToVector4(), $"{listing.UnitPrice.ToGilString()}\ue049");
-
-                    ImGui.TextUnformatted($"{Lang.Get("Amount")}:");
-
-                    ImGui.SameLine();
-                    ImGui.TextColored(KnownColor.LightSkyBlue.ToVector4(), $"{listing.Quantity}");
-
-                    ImGui.TextUnformatted($"{LuminaWrapper.GetAddonText(6936)}:");
-
-                    ImGui.SameLine();
-                    ImGui.TextColored(KnownColor.LightSkyBlue.ToVector4(), $"{totalPrice.ToGilString()}\ue049");
-
-                    ImGui.Separator();
-                    ImGui.Spacing();
-
-                    if (ImGui.MenuItem(LuminaWrapper.GetAddonText(9275)))
-                        MarketDataProvider.SendBuyRequest(listing);
-
-                }
-            }
+            // 本轮按用户要求移除「列表行右键购买菜单」：总价列只做展示，不再承载任何交互。
+            ImGui.TextUnformatted($"{totalPrice.ToGilString()}\ue049");
 
             ImGui.TableNextColumn();
 

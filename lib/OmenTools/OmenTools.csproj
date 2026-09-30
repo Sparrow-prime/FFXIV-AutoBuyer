@@ -30,9 +30,11 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="AngleSharp" Version="1.8.0" />
         <PackageReference Include="DailyRoutines.CodeAnalysis" Version="2.6.0" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
-        <PackageReference Include="GuerrillaNtp" Version="3.1.0"/>
+        <!-- 【AutoBuyer 本地改动】移除 GuerrillaNtp：仅 StandardTimeManager（已删除）使用，
+             该服务在插件加载时会外发 HTTP/NTP 请求取“标准时间”，本插件不需要。
+             【第五十六轮】移除 AngleSharp：唯一使用者是 LodestoneSearcher（抓网页，本插件不用），
+             已随该文件删除；它是发布包里最大的一块（约 1 MB）。 -->
         <PackageReference Include="TinyPinyin" Version="1.1.0"/>
     </ItemGroup>
 </Project>

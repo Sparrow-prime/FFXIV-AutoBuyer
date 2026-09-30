@@ -7,22 +7,10 @@ global using OmenTools.ImGuiOm;
 global using OmenTools.Extensions;
 global using OmenTools.Info.Game.Enums;
 global using OmenTools.OmenService;
-global using IAetheryteList = OmenTools.Dalamud.Services.Game.UI.Abstractions.IAetheryteList;
-global using IAetheryteEntry = OmenTools.Dalamud.Services.Game.UI.Abstractions.IAetheryteEntry;
-global using IPlayerCharacter = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.IPlayerCharacter;
-global using ICharacter = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.ICharacter;
-global using IGameObject = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.IGameObject;
-global using IObjectTable = OmenTools.Dalamud.Services.Game.Object.Abstractions.IObjectTable;
-global using IEventObj = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.IEventObj;
-global using INPC = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.INPC;
-global using IBattleChara = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.IBattleChara;
-global using IBattleNPC = OmenTools.Dalamud.Services.Game.Object.Abstractions.ObjectKinds.IBattleNPC;
-global using IDrawObject = OmenTools.Dalamud.Services.Graphics.Scene.Abstractions.IDrawObject;
-global using IEventHandler = OmenTools.Dalamud.Services.Game.Event.Abstractions.IEventHandler;
-global using ILuaActor = OmenTools.Dalamud.Services.Game.Event.Abstractions.ILuaActor;
-global using ISceneObject = OmenTools.Dalamud.Services.Graphics.Scene.Abstractions.ISceneObject;
-global using ISharedGroupLayoutInstance = OmenTools.Dalamud.Services.LayoutEngine.Group.Abstractions.ISharedGroupLayoutInstance;
-global using StatusList = OmenTools.Dalamud.Services.Game.StatusList;
+// 【第五十六轮】删除了 16 条 `global using IX = OmenTools.Dalamud.Services...` 别名：
+// 它们全部只出现在这一行、插件代码里没有任何使用点，却让「OmenTools 抽象层是否被引用」的
+// 静态扫描全部误判为「被引用」（别名本身也算一次类型提及）。实际用到的只有
+// `DService.Instance().ObjectTable`（其返回类型由 DService 属性决定，不需要别名）。
 global using static OmenTools.Global.Globals;
 global using static OmenTools.Info.Game.Data.Addons;
 

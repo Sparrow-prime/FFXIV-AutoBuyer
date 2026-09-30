@@ -277,7 +277,14 @@ public unsafe partial class MarketBoardModule
         lastGameItemAdoptTick         = now;
         pendingGameItemID             = 0;
 
-        MarketDataProvider.DiagLog($"跟随游戏侧物品 game={proxyItemID}（我方={provider.SelectedItemID}）");
+        // 常开一行：能走到这里，说明「我方从未请求过这个物品，游戏侧却变成它了」——
+        // 只可能是玩家在游戏原生布告板里自己改的，或有外部插件在写市场板搜索目标。
+        // 因此这行同时是「外部影响」的可观测入口（配合 Plugin.cs 的加载自检使用）。
+        MarketDataProvider.DataLog
+        (
+            $"[市场板] 游戏侧搜索目标变为 item={proxyItemID}（我方 item={provider.SelectedItemID}）→ 已跟随；"
+            + "若这不是你本人在游戏内切换的物品，则说明有其它来源在写市场板"
+        );
 
         provider.SelectItem(proxyItemID, reason: "同步游戏侧物品");
     }

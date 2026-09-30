@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using StandardTimeManager = OmenTools.OmenService.StandardTimeManager;
 using Timer = System.Threading.Timer;
 
 namespace OmenTools.Info.Collections;
@@ -80,7 +79,7 @@ public class LRUCache<TKey, TValue> : IDisposable where TKey : notnull
 
         lock (gate)
         {
-            var now = StandardTimeManager.Instance().UTCNow;
+            var now = DateTime.UtcNow;
 
             if (TryGetNodeValueNoLock(key, now, out var node, out var value))
             {
@@ -101,7 +100,7 @@ public class LRUCache<TKey, TValue> : IDisposable where TKey : notnull
 
         lock (gate)
         {
-            var now = StandardTimeManager.Instance().UTCNow;
+            var now = DateTime.UtcNow;
 
             if (TryGetNodeValueNoLock(key, now, out var node, out var value))
             {
@@ -122,7 +121,7 @@ public class LRUCache<TKey, TValue> : IDisposable where TKey : notnull
 
         lock (gate)
         {
-            if (!TryGetNodeValueNoLock(key, StandardTimeManager.Instance().UTCNow, out var node, out value))
+            if (!TryGetNodeValueNoLock(key, DateTime.UtcNow, out var node, out value))
                 return false;
 
             MoveToFrontNoLock(node);
@@ -141,7 +140,7 @@ public class LRUCache<TKey, TValue> : IDisposable where TKey : notnull
             var permanent = isPermanent ?? node.Value.IsPermanent;
             var expiresAt = permanent
                                 ? DateTime.MaxValue
-                                : StandardTimeManager.Instance().UTCNow.Add(expiration ?? defaultExpiration);
+                                : DateTime.UtcNow.Add(expiration ?? defaultExpiration);
 
             node.Value = new CacheItem(key, newValue, expiresAt, permanent);
             MoveToFrontNoLock(node);
@@ -229,7 +228,7 @@ public class LRUCache<TKey, TValue> : IDisposable where TKey : notnull
     {
         lock (gate)
         {
-            var now       = StandardTimeManager.Instance().UTCNow;
+            var now       = DateTime.UtcNow;
             var expiresAt = isPermanent ? DateTime.MaxValue : now.Add(expiration ?? defaultExpiration);
 
             foreach (var item in items)
@@ -347,7 +346,7 @@ public class LRUCache<TKey, TValue> : IDisposable where TKey : notnull
         {
             lock (gate)
             {
-                var now  = StandardTimeManager.Instance().UTCNow;
+                var now  = DateTime.UtcNow;
                 var node = lruList.Last;
 
                 while (node != null)

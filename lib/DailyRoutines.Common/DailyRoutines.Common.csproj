@@ -46,7 +46,8 @@
 
     <ItemGroup>
         <PackageReference Include="DailyRoutines.CodeAnalysis" Version="2.6.0" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
-        <PackageReference Include="TimeAgo.Core" Version="1.1.0" />
+        <!-- 【AutoBuyer 本地改动】移除 TimeAgo.Core：本插件唯一的使用点（世界卡片悬浮详情）
+             已作为死代码删除，整个解决方案不再引用该包。 -->
         <PackageReference Include="TinyPinyin" Version="1.1.0" />
     </ItemGroup>
 

@@ -26,20 +26,6 @@ public unsafe partial class MarketBoardModule
         public T?  Value;
     }
 
-    private sealed class HistoryDataSet
-    {
-        public List<HistoryEntry> Entries = [];
-        public int                TotalCount;
-        public uint               TotalQty;
-        public ulong              AvgPrice;
-        public int                HQCount;
-        public int                HQPercent;
-        public bool               IsCanBeHQ;
-        public bool               IsAnyHQ;
-        public ulong              AvgNQPrice;
-        public ulong              AvgHQPrice;
-    }
-
     private sealed class ListingsDataSet
     {
         public List<UniversalisMarketListing> Listings = [];
@@ -71,14 +57,12 @@ public unsafe partial class MarketBoardModule
     (
         List<RankedWorldPriceRow> valid,
         List<RankedWorldPriceRow> cheapest,
-        List<RankedWorldPriceRow> expensive,
-        WorldPriceRow             current
+        List<RankedWorldPriceRow> expensive
     )
     {
         public List<RankedWorldPriceRow> Valid     = valid;
         public List<RankedWorldPriceRow> Cheapest  = cheapest;
         public List<RankedWorldPriceRow> Expensive = expensive;
-        public WorldPriceRow             Current   = current;
     }
 
     private sealed class MarketDataProvider
@@ -133,7 +117,6 @@ public unsafe partial class MarketBoardModule
             pendingImplicitRefresh && Environment.TickCount64 < implicitRefreshDeadline;
 
         private int onlineDataVersion;
-        private int onlineHistoryVersion;
         private int itemEpoch;
 
         private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), UniversalisMarketDataResponse> onlineDataCache   = [];
@@ -141,9 +124,6 @@ public unsafe partial class MarketBoardModule
 
         private readonly Dictionary<(uint ItemID, uint WorldID), UniversalisAggregatedMarketDataResponse> onlineAggregatedCache       = [];
         private readonly Dictionary<(uint ItemID, uint WorldID), IDisposable>                             aggregatedSubscriptionCache = [];
-
-        private readonly Dictionary<(uint ItemID, uint WorldID), UniversalisMarketHistoryResponse> onlineHistoryCache       = [];
-        private readonly Dictionary<(uint ItemID, uint WorldID), IDisposable>                      historySubscriptionCache = [];
 
         private readonly Dictionary<string, List<WorldPriceRow>> cachedDCWorldPrices = [];
         private          WorldPriceRanks?                        worldPriceRanks;
@@ -202,10 +182,33 @@ public unsafe partial class MarketBoardModule
         /// 用于在「新世界数据真正重建完成」时补一条始终输出的日志，让玩家能确认列表确实更新了。
         /// </summary>
         private long worldResyncSearchTick;
+
+        /// <summary>
+        /// 跨服瞬间游戏侧持有的**挂单 ID 记忆**（第五十八轮）。
+        /// <para>
+        /// 为什么需要：跨服后游戏客户端会把**上一服务器**的挂牌重新显示出来（玩家在新世界走到布告板、
+        /// 界面重新加载那一刻最明显）。此时 <c>SearchItemId</c> 与物品一致、<c>IsFullyReceived()</c>
+        /// 也成立，光靠这两条会把旧世界的挂牌当成新世界的实时数据读走 ——
+        /// 顶部「本服」卡片就会挂上上一服务器的价格（实机反馈的 1~2 秒错价）。
+        /// </para>
+        /// 判据：当前挂牌的挂单 ID **全部**落在记忆集合里 ⇒ 仍是旧世界残留，不采信；
+        /// 一旦出现记忆之外的挂单 ID（新世界的挂单不可能与旧世界重合），立即恢复采信并停止怀疑。
+        /// </summary>
+        private readonly HashSet<ulong> worldResyncStaleListingIDs = [];
+
+        /// <summary>是否处于「跨服后新世界数据尚未确认」状态（配合 <see cref="worldResyncStaleListingIDs"/>）。</summary>
+        private bool worldResyncGameDataSuspected;
         private          string?                                 priceTableRegion;
         private          bool                                    priceTableHQOnly;
         private          bool                                    priceTableOnlyCurrentDC;
         private          bool                                    worldPriceTableDirty = true;
+
+        /// <summary>
+        /// 旧数据已整体作废（跨服 / 手动刷新）→ 下一次绘制必须**立刻**重建价格表，
+        /// 不受 <c>BetterMarketBoard-PriceTableUpdate</c> 的 3 秒节流限制
+        /// （否则卡片区会空白或停留在旧排名最多 3 秒，表现为「跨服后几秒才恢复」）。
+        /// </summary>
+        private bool forcePriceTableRebuild = true;
 
         /// <summary>已就「开始取卡片数据」打过日志的物品（每个物品一条，避免逐帧刷屏）。</summary>
         private uint priceCardLoggedItemID;
@@ -216,7 +219,6 @@ public unsafe partial class MarketBoardModule
         /// <summary>已就「本物品本轮发起了多少个世界的行情请求」打过日志的物品。</summary>
         private uint priceCardRequestLoggedItemID;
 
-        private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), CachedValue<HistoryDataSet>>  historyDataCache  = [];
         private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), CachedValue<ListingsDataSet>> listingsDataCache = [];
 
         private (int ItemEpoch, uint ItemID, bool HQOnly, uint ListingCount, int ContentHash, int PurchasedVersion) localListingsFingerprint;
@@ -520,7 +522,6 @@ public unsafe partial class MarketBoardModule
                 localListingsData        = null;
                 localListingsFingerprint = default;
                 onlineDataVersion++;
-                onlineHistoryVersion++;
             }
 
             SelectedWorldID = worldID;
@@ -558,20 +559,105 @@ public unsafe partial class MarketBoardModule
         /// 游戏侧市场数据在当前世界是否可用。
         /// 跨服后必须先观察到「清空 → 重新到齐」的完整循环：游戏侧在跨服瞬间仍持有
         /// 上一服务器的挂牌，若直接采用会把旧服务器价格显示（并缓存）成本服数据。
+        /// <para>
+        /// ⚠ 单靠 <c>IsFullyReceived()</c> **挡不住**跨服瞬间的残留挂牌：它对
+        /// 「<c>EntryCount == 0</c>」（一条数据都没有）返回 **true**，
+        /// 而 `ClearListData()` 制造的正是这个状态（详见 `CHANGELOG.md` 第四十七轮）。
+        /// 因此必须叠加 <c>!pendingWorldResyncSearch</c>：跨服后**尚未**为新世界真正下发过搜索之前，
+        /// 游戏侧读数一律不认 —— 否则上一服务器的挂牌会被当成新服务器的读数，
+        /// 并被写进服务器最低价缓存（半小时内优先于 Universalis 显示）。
+        /// </para>
         /// </summary>
         private bool IsGameMarketDataUsable
         (
             uint itemID
-        ) =>
-            InfoProxy                 != null                  &&
-            IsAbleToSearchLocalMarket()                        &&
-            InfoProxy->SearchItemId   == itemID                &&
-            InfoProxy->IsFullyReceived();
+        )
+        {
+            if (InfoProxy                 == null           ||
+                !IsAbleToSearchLocalMarket()                ||
+                InfoProxy->SearchItemId   != itemID         ||
+                pendingWorldResyncSearch                    ||
+                !InfoProxy->IsFullyReceived())
+                return false;
+
+            // 跨服后还要再过一道「旧世界残留」的判定（第五十八轮）：见 IsWorldResyncStaleReading()
+            return !IsWorldResyncStaleReading();
+        }
+
+        /// <summary>
+        /// 跨服后游戏侧读数是否仍是**上一服务器的残留**（第五十八轮）。
+        /// <para>
+        /// 判据：当前挂牌的挂单 ID 全部落在跨服瞬间的记忆集合里。新世界的挂单 ID 与旧世界不可能重合，
+        /// 因此「全是老 ID」只可能是客户端把旧列表又显示回来了。出现任一新 ID 即永久解除怀疑（本次跨服只判一次）。
+        /// 空列表不算残留（空读数取不到价格，也就污染不了卡片）。
+        /// </para>
+        /// <para>
+        /// 解除途径：出现新世界挂单 / 跨服瞬间没有记忆到任何挂牌（当时本来就没数据）/ 下一次跨服。
+        /// 若某物品在新世界确实无人挂售，「全是老 ID」的判定不会永久挡住界面 ——
+        /// 空列表按「不残留」处理，界面会正常显示「无在售」。
+        /// </para>
+        /// </summary>
+        private bool IsWorldResyncStaleReading()
+        {
+            if (!worldResyncGameDataSuspected)
+                return false;
+
+            // 直接遍历 Span，避免每帧 ToArray 的分配；同时按「真实挂单」过滤掉空槽位
+            // （Listings 的 Span 长度按容量给，尾部可能是全 0 的条目）。
+            var realCount = 0;
+
+            foreach (var listing in InfoProxy->Listings)
+            {
+                if (listing.ListingId == 0 || listing.UnitPrice == 0)
+                    continue;
+
+                realCount++;
+
+                if (worldResyncStaleListingIDs.Contains(listing.ListingId))
+                    continue;
+
+                worldResyncGameDataSuspected = false;
+
+                MarketDataProvider.WorldLog
+                (
+                    "[列表] 跨服后游戏侧读数已换新（出现新世界挂单）→ 恢复采信，此前的旧世界读数不再显示"
+                );
+
+                return false;
+            }
+
+            // 空读数不算残留：取不到价格，也就污染不了卡片
+            if (realCount == 0)
+                return false;
+
+            // 该日志在「持续判定为残留」期间每次绘制都可能被调用，因此限流（3 秒最多一条）
+            var now = Environment.TickCount64;
+
+            if (now - lastWorldStaleLogTick > 3_000)
+            {
+                lastWorldStaleLogTick = now;
+
+                MarketDataProvider.WorldLog
+                (
+                    $"[列表] 跨服后游戏侧仍是**上一服务器**的挂牌（{realCount} 条挂单全部来自旧世界）→ 不予采信"
+                );
+            }
+
+            return true;
+        }
+
+        /// <summary>「仍是旧世界挂牌」日志的限流时刻（避免逐帧刷屏）。</summary>
+        private long lastWorldStaleLogTick;
 
         /// <summary>
         /// 检测到跨服 / 世界切换时**立刻**作废旧世界的全部显示数据（不发起任何请求）。
         /// 与 <see cref="ResyncAfterWorldChange"/> 的区别：本方法在发现世界变化的当帧即执行，
         /// 不去抖等待；世界重同步仍按原节奏处理（用于锚定世界目录与补拉标记）。
+        /// <para>
+        /// 口径：**先删除缓存列表数据，再重新获取**。旧世界的挂牌 / 由它派生的一切缓存
+        /// 都在这里整体作废，之后由补拉机制为新世界取回数据 ——
+        /// 否则旧服务器的读数会被当成新服务器的价格显示、并被缓存半小时。
+        /// </para>
         /// </summary>
         public void InvalidateWorldData
         (
@@ -586,6 +672,43 @@ public unsafe partial class MarketBoardModule
 
             var info = InfoProxy;
 
+            // 记忆「跨服瞬间」游戏侧持有的挂单 ID：新世界的挂单不会与它重合，因此这组 ID
+            // 可以用来识别「客户端把旧世界列表又显示回来了」（第五十八轮，详见字段注释）。
+            // ⚠ 必须在 ClearListData 之前读，否则记到的永远是空集合。
+            worldResyncStaleListingIDs.Clear();
+
+            if (info != null)
+            {
+                foreach (var listing in info->Listings)
+                {
+                    if (listing.ListingId != 0 && listing.UnitPrice != 0)
+                        worldResyncStaleListingIDs.Add(listing.ListingId);
+                }
+            }
+
+            // 兜底：跨服落地/过场会把游戏侧列表清掉，此刻可能一条都读不到；
+            // 但客户端随后仍可能把「上一次读到的挂牌」重新显示出来（这正是错价的来源）。
+            // 因此再拿「最近一次采纳过的本地列表」的挂单 ID 兜底。
+            if (worldResyncStaleListingIDs.Count == 0 && localListingsData is { Listings.Count: > 0 } lastLocalListings)
+            {
+                foreach (var listing in lastLocalListings.Listings)
+                {
+                    if (listing.ListingId != 0)
+                        worldResyncStaleListingIDs.Add(listing.ListingId);
+                }
+            }
+
+            worldResyncGameDataSuspected = worldResyncStaleListingIDs.Count > 0;
+
+            if (worldResyncGameDataSuspected)
+            {
+                MarketDataProvider.WorldLog
+                (
+                    $"[列表] 跨服后已记忆旧世界挂牌 {worldResyncStaleListingIDs.Count} 条（挂单 ID 集合）；"
+                    + "在新世界挂单出现前，游戏侧读数一律不作为当前服务器的价格"
+                );
+            }
+
             if (info != null)
                 info->ClearListData();
 
@@ -598,6 +721,16 @@ public unsafe partial class MarketBoardModule
             localListingsFingerprint = default;
             localListingsBaseline    = default;
             localSearchRetryAttempts = 0;
+
+            // ── 先删除缓存列表数据 ──
+            // ① 由游戏列表 / 挂牌派生的缓存（均价、世界行情表）整体作废；
+            // ② 「服务器最低价缓存」也要清：它由游戏列表读出，跨服后若还留着，
+            //    旧服务器的价格会被当成当前服务器的价格继续显示（半小时内优先于 Universalis）。
+            ClearDerivedCaches();
+            gameMinPriceCache.Clear();
+
+            // 卡片区立刻重建一次（不受 3 秒节流限制），否则旧排名/空白会多停留几秒
+            forcePriceTableRebuild = true;
 
             // 交给补拉机制在新世界重新搜索（窗口未打开时不会发起任何请求）
             localListingsStale       = true;
@@ -1145,21 +1278,20 @@ public unsafe partial class MarketBoardModule
             DisposeAllSubscriptions();
 
             subscriptionCache.Clear();
-            historySubscriptionCache.Clear();
             aggregatedSubscriptionCache.Clear();
 
-            // 注意：保留 onlineDataCache / onlineAggregatedCache / onlineHistoryCache。
+            // 注意：保留 onlineDataCache / onlineAggregatedCache。
             // 它们以 (物品, 世界) 为键、跨物品复用；若在此清空，每次切换物品都会重新向
             // Universalis 拉取 28 个世界的数据，既慢又会触发 429 Too Many Requests。
             // 仅在体量异常时整体清一次，避免长期运行内存无界增长。
             if (onlineDataCache.Count       > CACHE_ENTRY_LIMIT) onlineDataCache.Clear();
             if (onlineAggregatedCache.Count > CACHE_ENTRY_LIMIT) onlineAggregatedCache.Clear();
-            if (onlineHistoryCache.Count    > CACHE_ENTRY_LIMIT) onlineHistoryCache.Clear();
 
             ClearDerivedCaches();
             cachedDCWorldPrices.Clear();
             worldPriceRanks          = null;
             worldPriceTableDirty     = true;
+            forcePriceTableRebuild   = true;
             localListingsData        = null;
             localListingsFingerprint = default;
             localListingsStale       = false;
@@ -1169,14 +1301,10 @@ public unsafe partial class MarketBoardModule
             localListingsBaseline    = default;
             itemEpoch++;
             onlineDataVersion++;
-            onlineHistoryVersion++;
         }
 
-        private void ClearDerivedCaches()
-        {
-            historyDataCache.Clear();
+        private void ClearDerivedCaches() =>
             listingsDataCache.Clear();
-        }
 
         private void DisposeSelectedWorldData
         (
@@ -1195,23 +1323,11 @@ public unsafe partial class MarketBoardModule
                 subscriptionCache.Remove(key);
                 onlineDataCache.Remove(key);
             }
-
-            var historyKey = (ItemID: itemID, WorldID: worldID);
-            if (historySubscriptionCache.Remove(historyKey, out var historySubscription))
-                historySubscription.Dispose();
-
-            onlineHistoryCache.Remove(historyKey);
         }
 
         private void DisposeAllSubscriptions()
         {
             foreach (var subscription in subscriptionCache.Values)
-            {
-                if (subscription != null)
-                    subscription.Dispose();
-            }
-
-            foreach (var subscription in historySubscriptionCache.Values)
             {
                 if (subscription != null)
                     subscription.Dispose();
@@ -1515,9 +1631,6 @@ public unsafe partial class MarketBoardModule
                 result = true;
             }
 
-            // 历史成交数据不再请求：成交均价已按需求移除，且唯一消费者 GetHistoryPercentilePrice 无调用者。
-            // 保留该缓存与订阅管线会在每次选择物品时多产生 1 次 Universalis 请求，故一并停用。
-
             return result;
         }
 
@@ -1540,116 +1653,6 @@ public unsafe partial class MarketBoardModule
             }
 
             return slot.Value;
-        }
-
-        private static HistoryEntry ToHistoryEntry
-        (
-            UniversalisHistorySale sale
-        )
-        {
-            var saleTime = sale.GetSaleTime().ToLocalTime();
-            return new(((DateTimeOffset)saleTime).ToUnixTimeSeconds(), saleTime, sale.PricePerUnit, sale.Quantity, sale.HQ);
-        }
-
-        public HistoryDataSet? GetHistoryDataSet
-        (
-            uint itemID,
-            bool? hqOnly = null
-        )
-        {
-            if (itemID == 0) return null;
-
-            var targetHQOnly = hqOnly ?? HQOnly;
-            var key  = (ItemID: itemID, WorldID: SelectedWorldID, HQOnly: targetHQOnly);
-            var slot = historyDataCache.GetOrAdd(key, static _ => new());
-
-            return GetOrBuild
-            (
-                slot,
-                onlineHistoryVersion,
-                () => BuildHistoryDataSet(itemID, key.WorldID, key.HQOnly)
-            );
-        }
-
-        private HistoryDataSet? BuildHistoryDataSet
-        (
-            uint itemID,
-            uint worldID,
-            bool hqOnly
-        )
-        {
-            if (!onlineHistoryCache.TryGetValue((itemID, worldID), out var response) ||
-                !response.Items.TryGetValue(itemID, out var itemHistory)             ||
-                itemHistory.Entries is not { Count: > 0 })
-                return null;
-
-            var isAnyHQ = itemHistory.Entries.Any(x => x.HQ);
-
-            var entries = itemHistory.Entries
-                                     .Where(x => x is { OnMannequin: false, PricePerUnit: > 0 } && (!hqOnly || x.HQ))
-                                     .Select(ToHistoryEntry)
-                                     .ToList();
-            if (entries.Count == 0) return null;
-
-            var isCanBeHQ   = LuminaGetter.TryGetRow<Item>(itemID, out var item) && item.CanBeHq;
-            var totalCount  = entries.Count;
-            var totalQty    = 0U;
-            var totalAmount = 0.0;
-            var hqCount     = 0;
-            var nqAmount    = 0.0;
-            var hqAmount    = 0.0;
-            var nqQty       = 0U;
-            var hqQty       = 0U;
-
-            foreach (var entry in entries)
-            {
-                totalQty    += entry.Quantity;
-                totalAmount += (double)entry.PricePerUnit * entry.Quantity;
-
-                if (entry.IsHQ)
-                {
-                    hqCount++;
-                    hqAmount += (double)entry.PricePerUnit * entry.Quantity;
-                    hqQty    += entry.Quantity;
-                }
-                else
-                {
-                    nqAmount += (double)entry.PricePerUnit * entry.Quantity;
-                    nqQty    += entry.Quantity;
-                }
-            }
-
-            var avgPrice = totalQty > 0 ?
-                               (ulong)Math.Round(totalAmount / totalQty) :
-                               0;
-            var hqPercent = (int)Math.Round((double)hqCount / totalCount * 100);
-
-            ulong avgNQPrice = 0;
-            ulong avgHQPrice = 0;
-
-            if (isCanBeHQ)
-            {
-                avgNQPrice = nqQty > 0 ?
-                                 (ulong)Math.Round(nqAmount / nqQty) :
-                                 0;
-                avgHQPrice = hqQty > 0 ?
-                                 (ulong)Math.Round(hqAmount / hqQty) :
-                                 0;
-            }
-
-            return new()
-            {
-                Entries    = entries,
-                TotalCount = totalCount,
-                TotalQty   = totalQty,
-                AvgPrice   = avgPrice,
-                HQCount    = hqCount,
-                HQPercent  = hqPercent,
-                IsCanBeHQ  = isCanBeHQ,
-                IsAnyHQ    = isAnyHQ,
-                AvgNQPrice = avgNQPrice,
-                AvgHQPrice = avgHQPrice
-            };
         }
 
         public ListingsDataSet? GetListingsDataSet
@@ -1787,6 +1790,11 @@ public unsafe partial class MarketBoardModule
             localListingsFingerprint = fingerprint;
             localListingsData        = BuildLocalListingsDataSet(info->SearchItemId, sourceListings);
             worldPriceTableDirty     = true;
+
+            // 新世界数据刚被采纳 → 卡片区**立刻**重建（第五十八轮）：
+            // 否则「本服」卡片会继续挂着上一次重建时的旧价格最多 3 秒（3 秒节流），
+            // 表现为跨服后列表已经加载完、卡片却还停在一两秒前的数值。
+            forcePriceTableRebuild   = true;
             pendingImplicitRefresh   = false;
 
             // 成功取回并采纳了本物品的数据 → 补拉完成（此后不再重复请求，避免游戏列表被反复刷新）
@@ -1951,13 +1959,16 @@ public unsafe partial class MarketBoardModule
                                (InfoProxy != null && InfoProxy->EntryCount > 0 && cachedDCWorldPrices.Count == 0);
             // 注意：Throttler 默认仅 500ms，而跨服/启动时 28 个世界的最低价会陆续到达，
             // 若按默认节流会让卡片区以 ~2 次/秒的频率重排（表现为「连续刷新」），故放宽到 3 秒。
-            var needRebuild = stateChanged ||
+            // 例外：旧数据刚被整体作废（跨服 / 手动刷新）时不等待 —— 越早重建，越早脱离旧读数。
+            var needRebuild = stateChanged          ||
+                              forcePriceTableRebuild ||
                               (worldPriceTableDirty && Throttler.Shared.Throttle("BetterMarketBoard-PriceTableUpdate", 3_000));
 
             if (needRebuild)
             {
                 DiagLog($"价格表重建 region={regionName} HQ={HQOnly} 仅当前大区={owner.config.OnlyCurrentDC}");
 
+                forcePriceTableRebuild  = false;
                 priceTableRegion        = regionName;
                 priceTableHQOnly        = HQOnly;
                 priceTableOnlyCurrentDC = owner.config.OnlyCurrentDC;
@@ -2098,10 +2109,7 @@ public unsafe partial class MarketBoardModule
                 cheapestWorlds.Clear();
             }
 
-            var currentWorldPrice = cachedDCWorldPrices.SelectMany(x => x.Value)
-                                                       .FirstOrDefault(x => x.WorldID == CurrentWorldID);
-
-            return new(validWorldPrices, cheapestWorlds, expensiveWorlds, currentWorldPrice);
+            return new(validWorldPrices, cheapestWorlds, expensiveWorlds);
         }
 
         /// <summary>玩家当前世界所属的数据中心名；无法判定时返回空字符串。</summary>
@@ -2149,128 +2157,7 @@ public unsafe partial class MarketBoardModule
 
         #endregion
 
-        #region 聚合统计与物品来源
-
-        public (float DailySales, ulong? AvgPrice, (ulong Price, DateTime Time, string WorldName)? RecentPurchase) GetItemAggregatedStats
-        (
-            uint itemID,
-            uint targetWorldID,
-            bool hqOnly
-        )
-        {
-            float                                           dailySales     = 0;
-            ulong?                                          avgPrice       = null;
-            (ulong Price, DateTime Time, string WorldName)? recentPurchase = null;
-
-            if (onlineAggregatedCache.TryGetValue((itemID, targetWorldID), out var response))
-            {
-                var result = response.Results.FirstOrDefault(x => x.ItemID == itemID);
-
-                if (result != null)
-                {
-                    var scope = GetAggregatedMarketScope(result, hqOnly);
-
-                    dailySales = scope.DailySaleVelocity.World.Quantity ?? scope.DailySaleVelocity.Region.Quantity ?? 0;
-
-                    if (scope.AverageSalePrice.World.Price is > 0)
-                        avgPrice = (ulong)Math.Round(scope.AverageSalePrice.World.Price.Value);
-                    else if (scope.AverageSalePrice.Region.Price is > 0)
-                        avgPrice = (ulong)Math.Round(scope.AverageSalePrice.Region.Price.Value);
-
-                    if (scope.RecentPurchase.World is { Price: > 0, Timestamp: > 0 })
-                    {
-                        recentPurchase = ((ulong)Math.Round(scope.RecentPurchase.World.Price.Value),
-                                             DateTimeOffset.FromUnixTimeMilliseconds(scope.RecentPurchase.World.Timestamp.Value).LocalDateTime,
-                                             LuminaWrapper.GetWorldName(targetWorldID));
-                    }
-                    else if (scope.RecentPurchase.Region is { Price: > 0, Timestamp: > 0 })
-                    {
-                        var worldName = scope.RecentPurchase.Region.WorldID is > 0 ?
-                                            LuminaWrapper.GetWorldName(scope.RecentPurchase.Region.WorldID.Value) :
-                                            string.Empty;
-                        recentPurchase = ((ulong)Math.Round(scope.RecentPurchase.Region.Price.Value),
-                                             DateTimeOffset.FromUnixTimeMilliseconds(scope.RecentPurchase.Region.Timestamp.Value).LocalDateTime,
-                                             worldName);
-                    }
-                }
-            }
-
-            return (dailySales, avgPrice, recentPurchase);
-        }
-
-        public ulong? GetSelectedWorldMinPrice
-        (
-            uint itemID,
-            bool hqOnly
-        )
-        {
-            if (SelectedWorldID == CurrentWorldID && IsGameMarketDataUsable(itemID))
-            {
-                var localMinPrice = InfoProxy->Listings.ToArray()
-                                                   .Where
-                                                   (x => x.ItemId    == itemID &&
-                                                         x.UnitPrice > 0       &&
-                                                         (x.IsHqItem || !hqOnly))
-                                                   .Select(x => x.UnitPrice)
-                                                   .DefaultIfEmpty()
-                                                   .Min();
-                return localMinPrice > 0 ? localMinPrice : null;
-            }
-
-            if (onlineAggregatedCache.TryGetValue((itemID, SelectedWorldID), out var response))
-            {
-                var result = response.Results.FirstOrDefault(x => x.ItemID == itemID);
-                var price = result == null ? null : GetAggregatedMarketScope(result, hqOnly).MinListing.World.Price;
-                if (price is > 0)
-                    return (ulong)Math.Round(price.Value);
-            }
-
-            if (!onlineDataCache.TryGetValue((itemID, SelectedWorldID, hqOnly), out var marketData) ||
-                !marketData.Items.TryGetValue(itemID, out var itemData))
-                return null;
-
-            var onlineMinPrice = itemData.Listings?
-                                           .Where(x => x.PricePerUnit > 0 && (x.HQ || !hqOnly))
-                                           .Select(x => x.PricePerUnit)
-                                           .DefaultIfEmpty()
-                                           .Min() ?? 0;
-            return onlineMinPrice > 0 ? onlineMinPrice : null;
-        }
-
-        public ulong? GetRegionMinPrice
-        (
-            uint itemID,
-            bool hqOnly
-        )
-        {
-            if (!owner.allWorlds.TryGetValue(EffectiveRegionName, out var region))
-                return null;
-
-            ulong? minPrice = null;
-            foreach (var worldID in region.Values.SelectMany(static worlds => worlds.Keys))
-            {
-                if (!onlineAggregatedCache.TryGetValue((itemID, worldID), out var response))
-                    continue;
-
-                var result = response.Results.FirstOrDefault(x => x.ItemID == itemID);
-                var price = result == null ? null : GetAggregatedMarketScope(result, hqOnly).MinListing.World.Price;
-                if (price is not > 0)
-                    continue;
-
-                var roundedPrice = (ulong)Math.Round(price.Value);
-                if (roundedPrice > 0 && (minPrice == null || roundedPrice < minPrice.Value))
-                    minPrice = roundedPrice;
-            }
-
-            return minPrice;
-        }
-
-        public UniversalisAggregatedMarketDataResponse? GetAggregatedResponse
-        (
-            uint itemID,
-            uint worldID
-        ) =>
-            onlineAggregatedCache.GetValueOrDefault((itemID, worldID));
+        #region 物品来源
 
         public ItemSourceInfo? GetItemSourceInfo
         (

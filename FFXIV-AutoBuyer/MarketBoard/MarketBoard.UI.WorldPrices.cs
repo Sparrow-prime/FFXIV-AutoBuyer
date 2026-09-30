@@ -1,10 +1,8 @@
-using System.Globalization;
 using System.Numerics;
 using DailyRoutines.Common.Interface.Widgets;
 using Dalamud.Utility.Numerics;
 using OmenTools.Interop.Game.Lumina;
 using OmenTools.OmenService;
-using TimeAgo;
 
 namespace FFXIVAutoBuyer.MarketBoard;
 
@@ -40,7 +38,7 @@ public partial class MarketBoardModule
             return;
         }
 
-        DrawPriceOverviewTable(frame, displayRegionName, ranks.Current.MinPrice, ranks.Expensive, ranks.Cheapest);
+        DrawPriceOverviewTable(frame, displayRegionName, ranks.Expensive, ranks.Cheapest);
     }
 
     private enum OverviewCardType
@@ -54,7 +52,6 @@ public partial class MarketBoardModule
     (
         MarketBoardUIContext               frame,
         string                             displayRegionName,
-        ulong                              currentWorldPrice,
         IReadOnlyList<RankedWorldPriceRow> expensiveWorlds,
         IReadOnlyList<RankedWorldPriceRow> cheapestWorlds
     )
@@ -98,8 +95,7 @@ public partial class MarketBoardModule
                 OverviewCardType.SingleOnly,
                 1,
                 1,
-                new Vector2(singleCardWidth, cardHeight),
-                currentWorldPrice
+                new Vector2(singleCardWidth, cardHeight)
             );
             ImGui.Spacing();
             return;
@@ -128,8 +124,7 @@ public partial class MarketBoardModule
                     OverviewCardType.Cheapest,
                     rank,
                     cheapCount,
-                    new Vector2(cardWidth, cardHeight),
-                    currentWorldPrice
+                    new Vector2(cardWidth, cardHeight)
                 );
             }
             else
@@ -163,8 +158,7 @@ public partial class MarketBoardModule
                     OverviewCardType.Expensive,
                     rank,
                     expCount,
-                    new Vector2(cardWidth, cardHeight),
-                    currentWorldPrice
+                    new Vector2(cardWidth, cardHeight)
                 );
             }
             else
@@ -182,8 +176,7 @@ public partial class MarketBoardModule
         OverviewCardType     cardType,
         int                  rank,
         int                  totalCount,
-        Vector2              cardSize,
-        ulong                currentWorldPrice
+        Vector2              cardSize
     )
     {
         var isCurrentWorld = world.WorldID == CurrentWorldID;
@@ -513,113 +506,6 @@ public partial class MarketBoardModule
         }
     }
 
-    private void DrawWorldPriceTooltip
-    (
-        MarketBoardUIContext frame,
-        uint                 worldID,
-        string               worldName,
-        ulong                minPrice,
-        ulong                currentWorldPrice
-    )
-    {
-        var isCurrentWorld = worldID  == CurrentWorldID;
-        var hasNoListing   = minPrice == ulong.MaxValue;
-
-        using (ImRaii.Tooltip())
-        {
-            var titleText = isCurrentWorld ?
-                                $"{worldName} ({Lang.Get("BetterMarketBoard-Tooltip-CurrentWorld")})" :
-                                worldName;
-
-            ImGui.TextColored
-            (
-                isCurrentWorld ?
-                    KnownColor.Pink.ToVector4() :
-                    KnownColor.LightSkyBlue.ToVector4(),
-                titleText
-            );
-            ImGui.Separator();
-
-            if (hasNoListing)
-                ImGui.TextDisabled("-");
-            else
-            {
-                ImGui.TextUnformatted($"{minPrice.ToGilString()}\ue049");
-
-                if (!isCurrentWorld && currentWorldPrice != 0 && currentWorldPrice != ulong.MaxValue)
-                {
-                    var diff        = (long)minPrice - (long)currentWorldPrice;
-                    var diffPercent = (double)diff / currentWorldPrice * 100.0;
-
-                    switch (diff)
-                    {
-                        case < 0:
-                        {
-                            var absDiff = (ulong)-diff;
-                            ImGui.TextColored
-                            (
-                                KnownColor.GreenYellow.ToVector4(),
-                                $"-{absDiff.ToGilString()}\ue049 (-{Math.Abs(diffPercent):F1}%)"
-                            );
-                            break;
-                        }
-                        case > 0:
-                        {
-                            var absDiff = (ulong)diff;
-                            ImGui.TextColored
-                            (
-                                KnownColor.OrangeRed.ToVector4(),
-                                $"+{absDiff.ToGilString()}\ue049 (+{diffPercent:F1}%)"
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (provider.GetAggregatedResponse(frame.ItemID, worldID) is { } aggResponse)
-            {
-                var aggResult = aggResponse.Results.FirstOrDefault(r => r.ItemID == frame.ItemID);
-
-                if (aggResult != null)
-                {
-                    var scope               = GetAggregatedMarketScope(aggResult, frame.HQOnly);
-                    var worldSales          = scope.DailySaleVelocity.World.Quantity ?? 0;
-                    var worldRecentPurchase = scope.RecentPurchase.World;
-
-                    ImGui.Separator();
-
-                    if (worldSales > 0)
-                    {
-                        ImGui.TextDisabled($"{Lang.Get("BetterMarketBoard-Tooltip-DailySales")}: ");
-                        ImGui.SameLine();
-                        ImGui.TextColored
-                        (
-                            KnownColor.LightSkyBlue.ToVector4(),
-                            Lang.Get("BetterMarketBoard-DailySales-Format", worldSales.ToString("0.#", CultureInfo.InvariantCulture))
-                        );
-                    }
-
-                    if (worldRecentPurchase is { Price: > 0, Timestamp: > 0 })
-                    {
-                        var timeAgoText = DateTimeOffset.FromUnixTimeMilliseconds(worldRecentPurchase.Timestamp.Value).LocalDateTime.TimeAgo();
-                        ImGui.TextDisabled($"{Lang.Get("BetterMarketBoard-RecentPurchase")}: ");
-                        ImGui.SameLine();
-                        ImGui.TextUnformatted($"{((ulong)Math.Round(worldRecentPurchase.Price.Value)).ToGilString()}\ue049 ({timeAgoText})");
-                    }
-                }
-            }
-
-            if (!isCurrentWorld)
-            {
-                ImGui.Separator();
-
-                using (UIFont(0.8f).Push())
-                    ImGui.TextDisabled($"{Lang.Get("RightClick")}：{Lang.Get("BetterMarketBoard-TravelToWorld")}");
-            }
-        }
-    }
-
     private void DrawAllWorldPricesToggleComponent
     (
         ImGuiDir direction
@@ -669,8 +555,6 @@ public partial class MarketBoardModule
         var rowHeight    = (ImGui.GetTextLineHeight() * 2f) + (6f * GlobalUIScale);
         var rounding     = 4f * GlobalUIScale;
 
-        var currentWorldPrice = dcsInRegion.Current.MinPrice;
-
         foreach (var (dcName, worldPricesList) in provider.DCWorldPrices)
         {
             var availWidth       = ImGui.GetContentRegionAvail().X;
@@ -717,7 +601,7 @@ public partial class MarketBoardModule
                 {
                     ImGui.SameLine(0, spacingX);
                     var card = worldPriceCards.GetOrAdd(world.WorldID, static _ => new());
-                    card.Draw(frame, world, new Vector2(capsuleWidth, rowHeight), currentWorldPrice);
+                    card.Draw(frame, world, new Vector2(capsuleWidth, rowHeight));
                 }
             }
 
@@ -730,20 +614,17 @@ public partial class MarketBoardModule
         private MarketBoardUIContext frame;
         private WorldPriceRow        world;
         private Vector2              targetSize;
-        private ulong                currentWorldPrice;
 
         public void Draw
         (
             MarketBoardUIContext frameParam,
             WorldPriceRow        worldParam,
-            Vector2              sizeParam,
-            ulong                currentWorldPriceParam
+            Vector2              sizeParam
         )
         {
-            frame             = frameParam;
-            world             = worldParam;
-            targetSize        = sizeParam;
-            currentWorldPrice = currentWorldPriceParam;
+            frame      = frameParam;
+            world      = worldParam;
+            targetSize = sizeParam;
 
             base.Draw();
         }

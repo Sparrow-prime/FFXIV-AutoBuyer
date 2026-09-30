@@ -23,15 +23,6 @@ public partial class MarketBoardModule
         ulong  MinPrice
     );
 
-    private readonly record struct HistoryEntry
-    (
-        double   X,
-        DateTime SaleTime,
-        ulong    PricePerUnit,
-        uint     Quantity,
-        bool     IsHQ
-    );
-
     private sealed class Config : ModuleConfig
     {
         /// <summary>大区 → 数据中心 → 世界 ID → 世界名（缓存自 Universalis 目录）。</summary>
@@ -64,8 +55,7 @@ public partial class MarketBoardModule
 
     private sealed class MarketFavoriteItem
     {
-        public uint   ItemID { get; set; }
-        public string Note   { get; set; } = string.Empty;
+        public uint ItemID { get; set; }
 
         public Item GetData() =>
             LuminaGetter.GetRow<Item>(ItemID).GetValueOrDefault();

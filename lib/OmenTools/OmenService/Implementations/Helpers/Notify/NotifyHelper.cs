@@ -352,52 +352,8 @@ public class NotifyHelper : OmenServiceBase<NotifyHelper>
 
     #endregion
 
-    #region TTS
-
-    public static void Speak(string message) =>
-        EdgeTTSIPC.Speak(message);
-
-    public static void Speak(string message, int? speed = null, int? pitch = null, int? volume = null) =>
-        EdgeTTSIPC.Speak(message, speed, pitch, volume);
-
-    public static Task SpeakAsync(string message, CancellationToken? token = null)
-    {
-        if (token?.IsCancellationRequested == true)
-            return Task.CompletedTask;
-
-        return EdgeTTSIPC.SpeakAsync(message, token ?? CancellationToken.None);
-    }
-
-    public static Task SpeakAsync(string message, int? speed = null, int? pitch = null, int? volume = null, CancellationToken? token = null)
-    {
-        if (token?.IsCancellationRequested == true)
-            return Task.CompletedTask;
-
-        return EdgeTTSIPC.SpeakAsync(message, speed, pitch, volume, token ?? CancellationToken.None);
-    }
-
-    public static void Synthesize(string message) =>
-        EdgeTTSIPC.Synthesize(message);
-
-    public static void Synthesize(string message, int? speed = null, int? pitch = null, int? volume = null) =>
-        EdgeTTSIPC.Synthesize(message, speed, pitch, volume);
-
-    public static Task SynthesizeAsync(string message, CancellationToken? token = null)
-    {
-        if (token?.IsCancellationRequested == true)
-            return Task.CompletedTask;
-
-        return EdgeTTSIPC.SynthesizeAsync(message, token ?? CancellationToken.None);
-    }
-
-    public static Task SynthesizeAsync(string message, int? speed = null, int? pitch = null, int? volume = null, CancellationToken? token = null)
-    {
-        if (token?.IsCancellationRequested == true)
-            return Task.CompletedTask;
-
-        return EdgeTTSIPC.SynthesizeAsync(message, speed, pitch, volume, token ?? CancellationToken.None);
-    }
-
-    #endregion
+    // 【AutoBuyer 本地改动·第五十六轮】删除 #region TTS：
+    // 它整块只是转发给 EdgeTTSIPC（依赖第三方 EdgeTTS 插件），而本插件只用 NotifyHelper 弹普通提示，
+    // 从不朗读/合成语音。删除后 EdgeTTSIPC 也随之移除，少一个可选 IPC 依赖。
 }
 

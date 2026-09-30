@@ -252,7 +252,7 @@ public unsafe partial class MarketBoardModule
                 var itemData     = favoriteItem.GetData();
                 if (itemData.RowId == 0) continue;
 
-                RenderItemCard(frame, itemData, note: favoriteItem.Note);
+                RenderItemCard(frame, itemData);
             }
         }
     }
@@ -260,9 +260,7 @@ public unsafe partial class MarketBoardModule
     private void RenderItemCard
     (
         MarketBoardUIContext frame,
-        Item                 item,
-        DateTime?            accessTime = null,
-        string?              note       = null
+        Item                 item
     )
     {
         var isCurrentHQ = provider.SelectedItemID == item.RowId && provider.HQOnly;
@@ -338,22 +336,7 @@ public unsafe partial class MarketBoardModule
         var textStartX = iconPos.X                + iconSize + (6f * GlobalUIScale);
         var textMaxX   = startPos.X + mainButtonW - padX;
 
-        var timeWidth = 0f;
-
-        if (accessTime != null)
-        {
-            var timeText = $"{accessTime.Value:HH:mm}";
-
-            using (UIFont(0.8f).Push())
-            {
-                var timeSize = ImGui.CalcTextSize(timeText);
-                timeWidth = timeSize.X + (4f * GlobalUIScale);
-                var timePos = new Vector2(textMaxX - timeSize.X, startPos.Y + (4f * GlobalUIScale));
-                drawList.AddText(timePos, ImGui.GetColorU32(ImGuiCol.TextDisabled), timeText);
-            }
-        }
-
-        var contentMaxX = textMaxX - timeWidth;
+        var contentMaxX = textMaxX;
 
         var itemName = item.Name.ToString();
         if (isCurrentHQ)
@@ -417,26 +400,6 @@ public unsafe partial class MarketBoardModule
                     true
                 );
             }
-
-            if (!string.IsNullOrEmpty(note))
-            {
-                var noteText = $"✎ {note}";
-
-                if (curBadgeX < contentMaxX)
-                {
-                    drawList.PushClipRect(startPos, new Vector2(contentMaxX, maxPos.Y), true);
-                    DrawItemCardBadge
-                    (
-                        drawList,
-                        noteText,
-                        curBadgeX,
-                        badgeY,
-                        KnownColor.DarkOrange.ToVector4().WithW(0.18f).ToUInt(),
-                        KnownColor.Orange.ToUInt()
-                    );
-                    drawList.PopClipRect();
-                }
-            }
         }
 
         var actionX = startPos.X + mainButtonW + (2f * GlobalUIScale);
@@ -451,7 +414,7 @@ public unsafe partial class MarketBoardModule
             if (isFavorite)
                 config.FavoriteItems.Remove(item.RowId);
             else
-                config.FavoriteItems[item.RowId] = new() { ItemID = item.RowId, Note = string.Empty };
+                config.FavoriteItems[item.RowId] = new() { ItemID = item.RowId };
 
             favoriteItemsVersion++;
             SaveConfig(config);

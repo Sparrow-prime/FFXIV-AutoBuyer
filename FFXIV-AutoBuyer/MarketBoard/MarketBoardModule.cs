@@ -127,37 +127,18 @@ public unsafe partial class MarketBoardModule : ModuleBase
             [x => x.Name.ToString(), x => x.RowId.ToString(), x => x.LevelItem.RowId.ToString()]
         );
 
+        // 购买流程用的任务链（按目标数量下单）；模块不再有其它 TaskHelper 任务。
         TaskHelper = new()
         {
             TaskIntervalMS = 500
         };
 
-        TaskHelper.Enqueue
-        (() =>
-            {
-                // 后台静默：窗口未打开时不发起任何请求（等开窗后再补；期间本任务按 500ms 轮询等待）
-                if (!IsPluginWindowOpen)
-                    return false;
-
-                _ = RemoteUniversalisCatalog.GetDataCentersOrRequest();
-                _ = RemoteUniversalisCatalog.GetWorldsOrRequest();
-
-                if (!RemoteUniversalisCatalog.TryGetDataCenters(out var dataCenters) ||
-                    !RemoteUniversalisCatalog.TryGetWorlds(out var worlds))
-                    return false;
-
-                var newAllWorlds = BuildAllWorlds(dataCenters, worlds);
-
-                allWorlds        = newAllWorlds;
-                config.AllWorlds = newAllWorlds;
-                SaveConfig(config);
-
-                provider.AnchorRegion();
-                provider.MarkPriceTableDirty();
-
-                return true;
-            }
-        );
+        // 【第五十七轮】这里原先还 Enqueue 了一个「等开窗后拉 Universalis 世界目录」的初始化任务：
+        // 窗口没打开时它一直返回 false 轮询等待，于是每次加载都在 10 秒后被 TaskHelper 以
+        // 「任务执行时间过长」整批放弃，日志里留下 `[AutoBuyer] 放弃了所有任务…` 一行。
+        // 该任务的能力与每秒 tick 里的 EnsureWorldCatalog() 完全重叠（后者同样是「窗口打开才跑、
+        // 未就绪就发起请求、就绪且与本地不同才重建 + AnchorRegion + MarkPriceTableDirty」），
+        // 因此整块删除，改为只靠 EnsureWorldCatalog() —— 既没有白跑的轮询，也不会再有放弃日志。
 
         CommandManager.Instance().AddCommand(COMMAND, new(OnCommand) { HelpMessage = Lang.Get("BetterMarketBoard-CommandHelp") });
 
@@ -180,7 +161,7 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
         GameState.Instance().MarketListingsStuck += OnMarketListingsStuck;
 
-        // 不注册道具工具提示（TooltipManager 已在 Plugin 初始化时禁用）：
+        // 不注册道具工具提示（TooltipManager 已在第五十五轮从内嵌库中删除）：
         // 既不给提示框追加市场数据，也不会因它而在日志里出现 [TooltipManager] 冗长行。
 
         // Lifestream IPC（可选依赖）：仅在玩家右键世界卡片请求传送时使用
@@ -262,7 +243,11 @@ public unsafe partial class MarketBoardModule : ModuleBase
             }
 
             if (lifestreamChangeWorldById?.InvokeFunc(worldID) == true)
-                NotifyHelper.Instance().NotificationSuccess(Lang.Get("BetterMarketBoard-Travel-Requested", displayName));
+            {
+                // 按用户要求去掉「申请跨服」的弹窗提醒：请求成功时不再弹任何提示
+                // （失败 / 繁忙仍会提示），只留一行诊断日志备查。
+                MarketDataProvider.DiagLog($"已请求 Lifestream 跨服传送到 {displayName}（world={worldID}）");
+            }
             else
                 NotifyHelper.Instance().NotificationError(Lang.Get("BetterMarketBoard-Travel-Failed", displayName));
         }
@@ -322,6 +307,11 @@ public unsafe partial class MarketBoardModule : ModuleBase
     /// 世界目录自愈：若首次拉取因限流/失败而不完整，配置中的世界列表会长期缺少新世界
     /// （例如国服后开的 沃仙曦染 / 晨曦王座），导致这些世界一直没有价格数据。
     /// 这里在窗口打开时周期性检查：目录一旦就绪且与本地缓存不同，立即刷新并重建价格表。
+    /// <para>
+    /// 它同时也是**唯一**的目录获取路径（第五十七轮起）：原先还有一个「等开窗后拉目录」的
+    /// TaskHelper 初始化任务，因长期空轮询被 TaskHelper 以超时放弃，已整块删除 ——
+    /// 那条路径能做的事这里全都做（未就绪 → 发请求；就绪且不同 → 重建 + 保存 + 锚定世界 + 标脏价格表）。
+    /// </para>
     /// </summary>
     private void EnsureWorldCatalog()
     {
@@ -390,9 +380,10 @@ public unsafe partial class MarketBoardModule : ModuleBase
     /// <summary>
     /// 每秒一次的窗口/数据节奏维护。
     /// <para>
-    /// 世界变化的判定**不在**这里：改为监听游戏日志「使用跨界传送移动到了xxx。」
-    /// （见 <see cref="OnWorldVisitLogMessage"/>），该行只在落地后出现，
-    /// 因此命中即可当帧处理，无需任何去抖/延迟等待。
+    /// 世界变化的**权威**判定不在日志之外：权威信号仍是游戏日志「使用跨界传送移动到了xxx。」
+    /// （见 <see cref="OnWorldVisitLogMessage"/>），该行只在落地后出现，命中即可当帧处理。
+    /// 但日志可能迟到，因此这里每秒再用「角色实际所在世界」巡检一次作为**兜底**
+    /// （纯本地读取、不发起任何请求）。
     /// </para>
     /// </summary>
     private void OnWorldWatch
@@ -423,6 +414,12 @@ public unsafe partial class MarketBoardModule : ModuleBase
 
         if (!isOverlayOpen)
             return;
+
+        // 每秒用「角色实际所在世界」巡检一次（纯本地读取，不发起任何请求）。
+        // 为什么需要：跨界传送日志是权威信号，但它只在落地后出现、且可能迟到若干秒；
+        // 在它到达之前，插件仍以为自己在旧世界，顶部卡片会继续把**上一服务器的价格**
+        // 当作当前价格显示。这里把这段窗口压到一个 tick 以内（世界一致时不写日志，避免刷屏）。
+        SyncWorldWithPlayerWorld("每秒巡检", logWhenUnchanged: false);
 
         // 世界目录自愈（若首次拉取因限流失败，补齐新增世界）
         EnsureWorldCatalog();
@@ -499,30 +496,51 @@ public unsafe partial class MarketBoardModule : ModuleBase
     }
 
     /// <summary>
-    /// 【老路】窗口打开时校正世界：窗口关闭期间玩家可能已经跨服（此时不监测日志）。
-    /// 以角色结构体的当前世界为准（落地后即更新），发现不同即按跨服处理。
+    /// 【老路·开窗校正】窗口打开时校正世界：窗口关闭期间玩家可能已经跨服（此时不监测日志）。
     /// 结果**始终**写入日志，便于与新路（<see cref="OnWorldVisitLogMessage"/>）对照排查。
     /// </summary>
-    private void SyncWorldOnWindowOpen()
+    private void SyncWorldOnWindowOpen() =>
+        SyncWorldWithPlayerWorld("开窗校正", logWhenUnchanged: true);
+
+    /// <summary>
+    /// 【老路】以「角色实际所在世界」（角色结构体，落地后即更新）校正世界锚点。
+    /// 纯本地读取，**不发起任何请求**：发现不同即按跨服处理（作废旧世界数据 → 交给补拉机制重取）。
+    /// <para>
+    /// 两处调用：① 窗口刚打开时（<paramref name="logWhenUnchanged"/> = true，结论始终写日志）；
+    /// ② 窗口打开期间每秒巡检（= false，一致时不写日志，避免每秒刷屏）。
+    /// </para>
+    /// </summary>
+    private void SyncWorldWithPlayerWorld
+    (
+        string reason,
+        bool   logWhenUnchanged
+    )
     {
         var worldID = ResolvePlayerWorldID(out var source);
 
         var changed = worldID != 0 && worldID != CurrentWorldID;
 
-        MarketDataProvider.WorldLog
-        (
-            $"[老路·开窗校正] 玩家实际所在世界={worldID}（来源={source}），当前世界锚点={CurrentWorldID}"
-            + (changed ? " → 不一致，按跨服处理" : " → 一致，无需变更")
-        );
+        if (changed || logWhenUnchanged)
+        {
+            MarketDataProvider.WorldLog
+            (
+                $"[老路·{reason}] 玩家实际所在世界={worldID}（来源={source}），当前世界锚点={CurrentWorldID}"
+                + (changed ? " → 不一致，按跨服处理" : " → 一致，无需变更")
+            );
+        }
 
         if (!changed) return;
 
-        HandleWorldChange(worldID, LuminaWrapper.GetWorldName(worldID), "开窗校正");
+        HandleWorldChange(worldID, LuminaWrapper.GetWorldName(worldID), reason);
     }
 
     /// <summary>
     /// 跨服 / 世界切换的统一处理：更新当前世界 → 作废旧世界数据 → 重同步。
     /// 全流程为本地操作（不发请求），搜索仍由「布告板可用即补」的既有机制驱动。
+    /// <para>
+    /// 同一世界的重复触发直接忽略：「每秒巡检」通常先于跨界传送日志完成判定，
+    /// 若日志到达时再作废一次，就会多清一次缓存、多发一次搜索。
+    /// </para>
     /// </summary>
     private void HandleWorldChange
     (
@@ -531,6 +549,12 @@ public unsafe partial class MarketBoardModule : ModuleBase
         string reason
     )
     {
+        if (worldID == 0 || worldID == CurrentWorldID)
+        {
+            MarketDataProvider.WorldLog($"[世界切换] 忽略重复触发：当前已是 {worldID}（来源：{reason}）");
+            return;
+        }
+
         var previous = CurrentWorldID;
         CurrentWorldID = worldID;
 

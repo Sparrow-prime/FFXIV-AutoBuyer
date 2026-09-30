@@ -19,14 +19,6 @@ public static class GameObjectExtension
 
     extension(IGameObject? gameObject)
     {
-        public unsafe bool TargetInteract()
-        {
-            if (gameObject == null) return false;
-
-            TargetManager.Target = gameObject;
-            return TargetSystem.Instance()->InteractWithObject(gameObject.ToStruct()) != 0;
-        }
-
         public unsafe bool Interact() =>
             gameObject                                                         != null &&
             TargetSystem.Instance()->InteractWithObject(gameObject.ToStruct()) != 0;

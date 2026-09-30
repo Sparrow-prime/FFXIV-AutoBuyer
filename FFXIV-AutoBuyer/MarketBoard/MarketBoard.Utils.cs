@@ -32,7 +32,7 @@ public unsafe partial class MarketBoardModule
     /// </list>
     /// 与游戏窗口是否在前台无关；窗口关闭期间发生的变化由**开窗时**一次性校正 + 一次刷新补齐。
     /// <para>
-    /// 注意：道具工具提示上的市场数据已整体移除（且 <c>TooltipManager</c> 在插件初始化时即被禁用），
+    /// 注意：道具工具提示上的市场数据已整体移除（且 <c>TooltipManager</c> 已从内嵌库中删除），
     /// 因此这里不再涉及工具提示。
     /// </para>
     /// </summary>

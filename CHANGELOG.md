@@ -1213,6 +1213,42 @@ if (data.Results.All(x => x.ItemID != itemID))
 
 ---
 
+## 1.1.4（2026-10-02）
+
+### 第六十轮：对照 Universalis 官方文档自查，并发上限与限速两处规范未遵守（2026-10-02）
+
+**背景**：用户给出官方文档 <https://docs.universalis.app/>，要求核对「本插件有什么规范没遵守」。
+
+**文档明文规范与自查结果**：
+
+| 文档要求（首页正文原文） | 本轮之前的实现 | 判定 |
+| ---- | ---- | ---- |
+| `rate limit of 25 req/s (50 req/s burst) on the API` | 靠聚合 15 分钟 TTL + 每秒 tick 最多处理 8 个世界 + 失败指数退避，常规峰值约 9 req/s；**但没有任何全局限速器**（连点物品时每次切换又会立刻再发最多 8 个） | ⚠️ 事实上合规、无护栏 |
+| `The number of simultaneous connections per IP is capped to 8` | 无并发闸门；`HttpClient` 未指定版本（默认 **HTTP/1.1**，一个在途请求占一条连接）。单次 `RequestAllWorldsData` 最多发 8 个聚合请求，紧接着再发 1 个「选中世界挂牌」请求 = **同一瞬间 9 条在途**；上游变慢、tick 继续推进时还会继续累积 | ❌ **未遵守** |
+| `Up to 100 item IDs can be comma-separated`（`/api/v2/{worldDcRegion}/{itemIds}`） | 每次只传 1 个物品 ID | ✅ |
+
+**处置**：
+
+| # | 措施 | 位置 |
+| ---- | ---- | ---- |
+| 1 | 所有请求统一过并发闸门 `SemaphoreSlim(8)`：先取速率令牌、再占并发槽位，响应体读完才归还 —— 在途请求数（= 连接数）硬顶 8 | `UniversalisApi.cs` |
+| 2 | 把「选中世界挂牌」请求（并发话题里的「+1」）从聚合批里**拆出来**：本轮只登记「欠一次挂牌请求」，等某一轮没有新聚合请求要发（`processedWorlds == 0`）时才发；欠账超过 8 秒兜底直发（此时并发上限仍由闸门保证）；换物品 / 换世界时清账 | `MarketBoard.Data.cs`（新增 `RequestSelectedWorldMarket`） |
+| 3 | 新增令牌桶限速器：20 req/s、突发 40（文档值 25 / 50，留出余量）；令牌不足时异步等待，不阻塞游戏主线程 | `UniversalisApi.cs` |
+
+**本轮刻意不做**（用户判定不重要）：`fields` / `entries` 响应裁剪、`Accept-Encoding: gzip` 传输压缩、UA 里的 `1.0` 版本号、注释与文档不符的 `entriesWithin` 单位（该参数从未被使用）；**HTTP/2 未启用** —— 加了并发闸门后 HTTP/1.1 已合规，h2 留作可选优化。
+
+**文档取值方式与实测依据**：文档站是 Next.js 单页应用，正文取自页面 JS 块、接口契约取自 `https://docs.universalis.app/api/schema/v2`（快照存于本地 `临时文件/universalis-docs-20261005/`）。实测：与插件完全同配置的 `HttpClient` 协商结果为 `version=1.1`；显式请求 HTTP/2 得到 `version=2.0`（服务端支持，本轮未启用）。
+
+**行为变化（供实机观察）**：在途请求峰值从最坏 9（上游慢时可更多）降到硬顶 8；跨世界挂牌表在「一次新物品要拉满 28 个世界」时会晚约 4~5 秒出（等某个空闲轮次），开「仅显示当前大区」时约 1 秒；速率硬顶 20 req/s、突发 40。
+
+**构建与产物**：`dotnet build FFXIV-AutoBuyer\FFXIV-AutoBuyer.csproj -c Release` → **0 错误 / 0 警告**；`AutoBuyer.dll` **152,064 B**（SHA256 `EA5D95443961E6FCB6A936A427FFA1FDF30B71A71FDDC19955B64A92DF9F85A2`），落 `E:\Code\Output\FFXIV-AutoBuyer\Release\`；清单 `AssemblyVersion` = `1.1.4.0`。
+
+**版本号** 清单 `1.1.3.1` → **`1.1.4`**（三位版本规范下的首个版本：z 位连增，功能调整与修复均递增）
+
+**测试**：本轮重跑 = 工程级构建（0 错误 / 0 警告）、插件清单、产物与依赖闭包（4 项，未携带 Dalamud / DR 私有程序集）、打包内容（`latest.zip`）、Universalis 契约 **32 项断言全 PASS**（含线上校验 `中国` 大区与 128 个世界）、静态合规（无 DR 私有命名空间、无硬编码盘符路径）、部署一致性（`dalamudConfig.json` 的 `DevPluginSettings` 指向的正是本次构建产物）；**未重跑** = 词条计数（本轮改动不含任何 `Lang.Get`）、实机加载日志。**实机回归由用户自测完成**。
+
+---
+
 ## 附录 A：已否决与已回滚的方案
 
 集中登记，避免读者把中间态误当现行设计。

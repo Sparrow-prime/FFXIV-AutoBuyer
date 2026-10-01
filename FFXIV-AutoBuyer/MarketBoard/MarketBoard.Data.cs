@@ -356,6 +356,21 @@ public unsafe partial class MarketBoardModule
         /// </summary>
         private const int MAX_AGGREGATED_WORLDS_PER_CALL = 8;
 
+        /// <summary>
+        /// 「欠一次选中世界挂牌请求」的登记：见 <see cref="RequestAllWorldsData"/> 尾部的「不同步」说明。
+        /// </summary>
+        private bool selectedWorldMarketPending;
+
+        /// <summary>欠账的登记时刻（仅用于超时兜底）。</summary>
+        private long selectedWorldMarketPendingSinceTick;
+
+        /// <summary>
+        /// 欠账最长等待（毫秒）。正常情况下一轮聚合批最多 4 个 tick 就发完
+        /// （单大区 28 个世界 ÷ 每轮 8 个），因此这只是兜底；即便兜底触发，
+        /// 在途请求数也仍由 <c>UniversalisApi</c> 的并发闸门压在 8 以内。
+        /// </summary>
+        private const long SELECTED_WORLD_MARKET_MAX_PENDING_MS = 8_000;
+
         /// <summary>最近窗口内的自动请求记录（熔断用）：(物品, 时刻)。</summary>
         private static readonly Queue<(uint ItemID, long Tick)> autoRequestTicks = [];
 
@@ -1333,6 +1348,11 @@ public unsafe partial class MarketBoardModule
             localSearchRetryDeadline = 0;
             localListingsBaseline    = default;
             itemEpoch++;
+
+            // 换物品/换世界后旧账作废：新的一轮 RequestAllWorldsData 会按需重新登记
+            selectedWorldMarketPending          = false;
+            selectedWorldMarketPendingSinceTick = 0;
+
             onlineDataVersion++;
         }
 
@@ -1449,11 +1469,6 @@ public unsafe partial class MarketBoardModule
                 if (!string.IsNullOrEmpty(currentDCName) && targetRegion.ContainsKey(currentDCName))
                     dcsToProcess = new() { [currentDCName] = targetRegion[currentDCName] };
             }
-
-            var marketParam = new UniversalisMarketDataRequestParams
-            {
-                HQ = hqOnly
-            };
 
             var epoch  = itemEpoch;
             var result = false;
@@ -1612,30 +1627,73 @@ public unsafe partial class MarketBoardModule
                 );
             }
 
+            // ── 选中世界的挂牌请求（并发话题里的「+1」）：与聚合批**不同步**发出 ──
+            // 原因：这一轮最多已经发出 MAX_AGGREGATED_WORLDS_PER_CALL(8) 个聚合请求，
+            // 若紧接着再发 1 个挂牌请求，同一瞬间就有 9 个在途 HTTP 请求 —— 超过 Universalis
+            // 明文规定的「每 IP 同时连接数上限 8」（本客户端是 HTTP/1.1，在途请求 = 连接）。
+            // 因此本轮只登记「欠一次挂牌请求」，等某一轮没有新聚合请求可发（processedWorlds == 0）时再发。
+            // 兜底：欠账超过 SELECTED_WORLD_MARKET_MAX_PENDING_MS 就直接发 —— 即使那时并发批仍在途，
+            // 也不会破 8（UniversalisApi 的信号量在那里兜底），代价只是那一瞬间少一个并发余量。
+            var nowTick = Environment.TickCount64;
+
+            if (processedWorlds == 0 ||
+                (selectedWorldMarketPending &&
+                 nowTick - selectedWorldMarketPendingSinceTick >= SELECTED_WORLD_MARKET_MAX_PENDING_MS))
+            {
+                selectedWorldMarketPending = false;
+
+                if (RequestSelectedWorldMarket(targetRegion, itemID, hqOnly, epoch))
+                    result = true;
+            }
+            else if (!selectedWorldMarketPending)
+            {
+                selectedWorldMarketPending          = true;
+                selectedWorldMarketPendingSinceTick = nowTick;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 选中世界的挂牌数据（<c>GET /api/v2/{worldDcRegion}/{itemIds}</c>），即并发话题里的「+1」。
+        /// <para>
+        /// 只在 <see cref="RequestAllWorldsData"/> 的**空闲轮次**（这一轮没有新聚合请求要发）被调用，
+        /// 使它不会与那一批 8 个聚合请求在同一瞬间在途。
+        /// </para>
+        /// </summary>
+        private bool RequestSelectedWorldMarket
+        (
+            Dictionary<string, Dictionary<uint, string>> targetRegion,
+            uint                                        itemID,
+            bool                                        hqOnly,
+            int                                         epoch
+        )
+        {
+            if (!owner.IsPluginWindowOpen)
+                return false;
+
             var selectedWorldName = targetRegion.Values.SelectMany(static dc => dc)
                                                 .FirstOrDefault(world => world.Key == SelectedWorldID)
                                                 .Value;
 
             if (string.IsNullOrEmpty(selectedWorldName))
-                return result;
-
-            var marketCacheKey = (itemID, SelectedWorldID, hqOnly);
+                return false;
 
             // 本服在售列表可直接从游戏读取时，无需再向 Universalis 请求同一世界的挂牌数据
-            var localDataAvailable = SelectedWorldID == CurrentWorldID &&
-                                     IsGameMarketDataUsable(itemID);
+            if (SelectedWorldID == CurrentWorldID && IsGameMarketDataUsable(itemID))
+                return false;
 
-            if (!localDataAvailable)
-            {
-                _ = RemoteUniversalisMarket.GetOrRequest([itemID], selectedWorldName, marketParam);
-            }
+            var marketCacheKey = (itemID, SelectedWorldID, hqOnly);
+            var marketParam    = new UniversalisMarketDataRequestParams { HQ = hqOnly };
+            var result         = false;
+
+            _ = RemoteUniversalisMarket.GetOrRequest([itemID], selectedWorldName, marketParam);
 
             // 与跨世界行情同理：**未持有该（物品 × 世界）的挂牌数据时，即便订阅表里已有条目也要重新订阅** ——
             // 旧订阅可能已因「切换物品 → ClearAllData → DisposeAllSubscriptions」被摘除，
             // 晚到的响应无人接收，而订阅表（若未被清理）会让我们误以为已经订阅过。
-            if (!localDataAvailable                                          &&
-                (!subscriptionCache.ContainsKey(marketCacheKey)              ||
-                 !onlineDataCache.ContainsKey(marketCacheKey)))
+            if (!subscriptionCache.ContainsKey(marketCacheKey) ||
+                !onlineDataCache.ContainsKey(marketCacheKey))
             {
                 if (subscriptionCache.Remove(marketCacheKey, out var staleSubscription))
                     staleSubscription.Dispose();

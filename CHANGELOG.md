@@ -1203,6 +1203,14 @@ if (data.Results.All(x => x.ItemID != itemID))
 
 **构建与产物（2026-10-01 16:27 首轮 / 16:30 定稿）**：工程级 `dotnet build FFXIV-AutoBuyer\FFXIV-AutoBuyer.csproj -c Release` 与解决方案级 `.slnx` 均 **0 错误 / 0 警告**；`-t:Rebuild` 全量重建复核结果与增量一致。**定稿产物**（含本轮的口径更正）`AutoBuyer.dll` 150,016 B（SHA256 `66855F52CB1182952F7B4C65321908B62578906CE2BFDB591D6C4F9FE1F448CB`，2026-10-01 16:30:58），落 `E:\Code\Output\FFXIV-AutoBuyer\Release\`；清单与 DLL 版本 `1.1.3.1`；DLL 元数据含新方法 `RemoveGameMinPriceCacheEntriesForWorld`（与 `InvalidateWorldData` / `IsWorldResyncStaleReading` 并存），确认改动确在游戏加载的那份产物里。（16:27 那版为纯代码改动版，SHA256 `564A1AFC…7AA36`，已被定稿版取代。）
 
+**提交** `d86e6b2` — *fix: 1.1.3.1 跨服不再清空服务器价缓存（顶部价格信息块恢复服务器价优先）*（4 文件：`FFXIV-AutoBuyer.csproj` + `MarketBoard.Data.cs` + `MarketBoardModule.cs` + 新增 `CHANGELOG.md`；**+1,381 / −20**）
+**版本号** 清单 `1.1.3.0` → **`1.1.3.1`**（**修订位**：z 不变、a 递增；对外仍显示 `1.1.3` —— 本轮是 1.1.3 的同一发布单元内的修订，与第五十三～五十八轮同属一次发布）
+**tag** `1.1.3.1`（annotated，指向 `d86e6b2`）。既有 `1.1.3` tag 保留不动（该 tag 用的是旧的四位版本写法，故新 tag 只能带 `.1` 尾段）
+**Release** <https://github.com/Sparrow-prime/FFXIV-AutoBuyer/releases/tag/1.1.3.1>（**标题仍为 `1.1.3`**，与既有 release 标题一致；正文 1,400 字符，已核对无乱码）
+**附件** `latest.zip` **391,611 B**（SHA256 `B76C451F12DA27AFE85272A57AE56ED2A8E12C8F5295757B1E1329DE64F9F0CB`；GitHub 侧资产 `digest=sha256:b76c451f…0cb` 与本地一致），内含 `AutoBuyer.dll` 150,016 B（SHA256 `66855F52…48CB`）、`AutoBuyer.json`、`AutoBuyer.deps.json`、`Localization/zh-CN.json`、`OmenTools.dll`、`DailyRoutines.Common.dll`、`TinyPinyin.dll`
+**推送方式**：本机 SSH（22 端口）仍被网络环境拦截（`Connection closed … port 22`），改走 HTTPS + Token（`E:\Code\Personal file\github_token.txt`，仅经命令参数与环境传入，未写入 `.git/config`、未落盘、未回显）
+**测试**：自动化（构建 / 清单 / 产物 / 部署一致性）见 `测试文档.md`（2026-10-01 重跑）；**实机回归（★1、★1b、★2、★3）尚未执行**，见该文件 §三
+
 ---
 
 ## 附录 A：已否决与已回滚的方案

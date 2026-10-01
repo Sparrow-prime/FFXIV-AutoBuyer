@@ -16,6 +16,7 @@
 | 1.1.1 | 2026-09-19 | §1.1.1 | `392e0d5` ／ tag `1.1.1` |
 | 1.1.2 | 2026-09-24 | §1.1.2 | `6d50976` ／ tag `1.1.2` |
 | 1.1.3 | 2026-10-01 | §1.1.3 | `73ae5bd` ／ tag `1.1.3` |
+| 1.1.4 | 2026-10-02 | §1.1.4 | `8c016fd` ／ tag `1.1.4` |
 
 **版本归属的口径与限度（如实说明）**：第五轮之前的逐轮记录，原文（`测试文档.md` §四~§七、`设计文档.md` §十五~§十七）只注明日期、未注明所属版本，无法凭原文可靠判定每轮落在哪个 tag 内；本节按**日期先后**排入相邻版本，凡原文未明示者一律不臆断，均列在对应版本下并标注轮次与日期。第五轮及以后各轮的版本归属以原文为准。
 
@@ -1246,6 +1247,13 @@ if (data.Results.All(x => x.ItemID != itemID))
 **版本号** 清单 `1.1.3.1` → **`1.1.4`**（三位版本规范下的首个版本：z 位连增，功能调整与修复均递增）
 
 **测试**：本轮重跑 = 工程级构建（0 错误 / 0 警告）、插件清单、产物与依赖闭包（4 项，未携带 Dalamud / DR 私有程序集）、打包内容（`latest.zip`）、Universalis 契约 **32 项断言全 PASS**（含线上校验 `中国` 大区与 128 个世界）、静态合规（无 DR 私有命名空间、无硬编码盘符路径）、部署一致性（`dalamudConfig.json` 的 `DevPluginSettings` 指向的正是本次构建产物）；**未重跑** = 词条计数（本轮改动不含任何 `Lang.Get`）、实机加载日志。**实机回归由用户自测完成**。
+
+**提交** `8c016fd` — *fix: 1.1.4 Universalis 并发与限速合规（并发硬顶 8、挂牌请求与聚合批分离、令牌桶护栏）*（4 文件：`FFXIV-AutoBuyer.csproj` + `MarketBoard.Data.cs` + `UniversalisApi.cs` + `CHANGELOG.md`；**+215 / −26**）
+**版本号** 清单 `1.1.3.1` → **`1.1.4`**
+**tag** `1.1.4`（annotated，指向 `8c016fd`）
+**Release** <https://github.com/Sparrow-prime/FFXIV-AutoBuyer/releases/tag/1.1.4>（标题 `1.1.4`，正文 752 字符，已线上核对无乱码）
+**附件** `latest.zip` **401,804 B**（SHA256 `FF78E8A51EEF7D69B4F769D62B865ECE653CEE2AA71E78193E7A9EDB591461A4`；GitHub 侧资产 `digest=sha256:ff78e8a5…61a4` 与本地一致），内含 `AutoBuyer.dll` 152,064 B（SHA256 `EA5D9544…F85A2`）、`AutoBuyer.json`、`AutoBuyer.deps.json`、`Localization/zh-CN.json`、`OmenTools.dll`、`DailyRoutines.Common.dll`、`TinyPinyin.dll`
+**推送方式**：HTTPS + Token（`E:\Code\Personal file\github_token.txt`，仅在内联脚本中展开、输出已脱敏；未写入 `.git/config`、未落盘、未回显）。本机 SSH（22 端口）沿用上轮结论仍被网络环境拦截，故走 HTTPS。
 
 ---
 

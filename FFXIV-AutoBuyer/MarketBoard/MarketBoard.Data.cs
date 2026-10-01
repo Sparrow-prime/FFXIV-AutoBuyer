@@ -161,7 +161,13 @@ public unsafe partial class MarketBoardModule
         /// <summary>行号记忆上限（超出后整体重建，避免长期运行无界增长）。</summary>
         private const int RETAINER_ROW_INDEX_LIMIT = 512;
 
-        /// <summary>跨服后是否在等待「游戏布告板可用」的时刻（可用即立刻搜索，不再空等延迟）。</summary>
+        /// <summary>
+        /// 跨服后是否在等待「过场结束（可发起本地搜索）」的时刻（可用即立刻搜索，不再空等首次延迟）。
+        /// <para>
+        /// 判据本身是 <c>IsAbleToSearchLocalMarket()</c>（已登录 + 不在副本）+ <c>!IsPlayerTransitioning</c>；
+        /// 本插件替代布告板界面，因此这里等的**不是**玩家走到布告板，而是跨界传送的过场结束。
+        /// </para>
+        /// </summary>
         private bool waitingBoardAfterWorldChange;
 
         /// <summary>
@@ -186,8 +192,8 @@ public unsafe partial class MarketBoardModule
         /// <summary>
         /// 跨服瞬间游戏侧持有的**挂单 ID 记忆**（第五十八轮）。
         /// <para>
-        /// 为什么需要：跨服后游戏客户端会把**上一服务器**的挂牌重新显示出来（玩家在新世界走到布告板、
-        /// 界面重新加载那一刻最明显）。此时 <c>SearchItemId</c> 与物品一致、<c>IsFullyReceived()</c>
+        /// 为什么需要：跨服后游戏客户端会把**上一服务器**的挂牌重新显示出来（在新世界首次请求市场数据、
+        /// 列表重新加载那一刻最明显）。此时 <c>SearchItemId</c> 与物品一致、<c>IsFullyReceived()</c>
         /// 也成立，光靠这两条会把旧世界的挂牌当成新世界的实时数据读走 ——
         /// 顶部「本服」卡片就会挂上上一服务器的价格（实机反馈的 1~2 秒错价）。
         /// </para>
@@ -230,19 +236,17 @@ public unsafe partial class MarketBoardModule
         private long                                                    localSearchNextRetryTick;
         private (uint SearchItemId, uint EntryCount, uint ListingCount) localListingsBaseline;
 
-        /// <summary>
-        /// 本地列表补拉参数：重获取上限 1 次（加上初次请求最多 2 次）、
-        /// 首次等待 3 秒、后续间隔 5 秒、总窗口 12 秒。
-        /// 参数刻意保守：游戏市场列表本身刷新较慢，频繁补拉会表现成「持续刷新」。
-        /// </summary>
         // 补拉（单次获取 + 失败重试）策略。
-        // 注意：跨服后玩家需要重新走到市场布告板，IsAbleToSearchLocalMarket() 才会为真，
-        // 因此总窗口只在「可以搜索」的时间段内消耗（不可搜索 / 服务器拒绝时自动续期），
-        // 否则窗口会在玩家还没走到布告板前就过期，导致一直取不到数据。
+        // 注意：本插件**替代布告板界面**，本地搜索不需要玩家站在布告板前 ——
+        // IsAbleToSearchLocalMarket() 只要求「已登录 + 不在副本」；跨服后唯一的等待来源是
+        // 跨界传送的过场（IsPlayerTransitioning），通常数秒内结束。
+        // 因此总窗口只在「可以搜索」的时间段内消耗（过场中 / 服务器拒绝时自动续期），
+        // 否则窗口会在玩家还卡在过场里时就过期，导致一直取不到数据。
+        // 参数刻意保守：游戏市场列表本身刷新较慢，频繁补拉会表现成「持续刷新」。
         /// <summary>允许的自动补拉次数（每次仅请求 1 个物品）。</summary>
         private const int LOCAL_SEARCH_RETRY_MAX_ATTEMPTS = 2;
 
-        /// <summary>首次补拉延迟：避开跨服落地瞬间（此时游戏侧尚不能搜索）。</summary>
+        /// <summary>首次补拉延迟：避开跨服落地瞬间（此时仍在过场、或游戏侧尚未就绪）。</summary>
         private const long LOCAL_SEARCH_RETRY_FIRST_DELAY_MS = 2_500;
 
         /// <summary>两次补拉之间的间隔。</summary>
@@ -307,6 +311,24 @@ public unsafe partial class MarketBoardModule
 
         /// <summary>服务器最低价缓存有效期（毫秒）：半小时。</summary>
         private const long GAME_MIN_PRICE_TTL_MS = 30 * 60 * 1000;
+
+        /// <summary>
+        /// 只删除服务器最低价缓存中「指定世界」的所有条目（跨服时删目的地世界用，见 <see cref="InvalidateWorldData"/>）。
+        /// <para>
+        /// 为什么不是 <c>gameMinPriceCache.Clear()</c>：整体清空会连带丢掉其它世界（含刚离开的世界）
+        /// 最近一次真实读到的服务器价格，顶部价格信息块随即回落到滞后于网页的 Universalis 聚合数据。
+        /// </para>
+        /// </summary>
+        private void RemoveGameMinPriceCacheEntriesForWorld
+        (
+            uint worldID
+        )
+        {
+            if (worldID == 0) return;
+
+            foreach (var key in gameMinPriceCache.Keys.Where(key => key.WorldID == worldID).ToList())
+                gameMinPriceCache.Remove(key);
+        }
 
         /// <summary>聚合数据的请求记录（分批遍历时跳过已请求过的世界，避免配额被前几个世界反复占用）。</summary>
         private readonly Dictionary<(uint ItemID, uint WorldID), long> aggregatedRequestTicks = [];
@@ -723,11 +745,22 @@ public unsafe partial class MarketBoardModule
             localSearchRetryAttempts = 0;
 
             // ── 先删除缓存列表数据 ──
-            // ① 由游戏列表 / 挂牌派生的缓存（均价、世界行情表）整体作废；
-            // ② 「服务器最低价缓存」也要清：它由游戏列表读出，跨服后若还留着，
-            //    旧服务器的价格会被当成当前服务器的价格继续显示（半小时内优先于 Universalis）。
+            // ① 由游戏列表 / 挂牌派生的缓存整体作废；
+            // ② 「服务器最低价缓存」整体**保留**，只删「本次目的地（= 新当前世界）」的条目。
+            //
+            // 为什么不整体清（第五十九轮）：该缓存是顶部价格信息块（三低/三高卡片）在本服读不到游戏数据时的
+            // 「服务器价」来源。整体清空会让所有尚未重新读到的世界（含新世界）立刻回落到 Universalis 聚合，
+            // 而聚合接口明显滞后于其网页、更滞后于游戏读数 —— 表现为「跨服后卡片只能显示落后的网站数据」。
+            //
+            // 保留为什么不会重现第五十三轮的跨服错价：旧世界读数被写进**新世界键**那条路已由两道护栏堵死 ——
+            // 「跨服后尚未为新世界下发过搜索 → 不采信游戏侧读数」（!pendingWorldResyncSearch）
+            // 与「挂牌 ID 全部来自跨服瞬间记忆 → 不采信」（IsWorldResyncStaleReading）；
+            // 两条都成立时 gameMinPriceCache 不会被写入任何读数，缓存里也不会凭空出现新世界的价格。
+            // 而每个键都带世界 ID，旧世界条目只会显示在**旧世界自己的卡片**上（属于该世界自己的历史读数）。
+            // 目的世界条目仍然删掉：那些通常是从网站回落写入的「非服务器读数」，
+            // 删掉才能保证新世界的卡片优先显示游戏数据，而不是旧一次的网站数值。
             ClearDerivedCaches();
-            gameMinPriceCache.Clear();
+            RemoveGameMinPriceCacheEntriesForWorld(CurrentWorldID);
 
             // 卡片区立刻重建一次（不受 3 秒节流限制），否则旧排名/空白会多停留几秒
             forcePriceTableRebuild = true;
@@ -755,7 +788,7 @@ public unsafe partial class MarketBoardModule
             ClearAllData();
 
             // 跨服后不再立即发起游戏搜索（减少与游戏服务器通信），
-            // 仅标记待补拉：若布告板窗口开着，稍后由补拉机制补 1 次；窗口关着则完全不请求。
+            // 仅标记待补拉：插件窗口开着时稍后由补拉机制补 1 次；窗口关着则完全不请求（通信最小化）。
             MarkLocalListingsStale(info, "世界重同步");
         }
 
@@ -935,7 +968,7 @@ public unsafe partial class MarketBoardModule
                 waitingBoardAfterWorldChange = false;
                 localSearchNextRetryTick     = 0;
 
-                DiagLog("跨服后布告板已可用 → 立即发起搜索");
+                DiagLog("跨服后已可发起本地搜索（过场结束）→ 立即发起搜索");
             }
 
             // 服务器正在拒绝请求：不消耗窗口与尝试次数，等冷却结束再补

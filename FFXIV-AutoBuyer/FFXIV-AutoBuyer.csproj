@@ -2,7 +2,7 @@
 <Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
 
   <PropertyGroup>
-    <Version>1.1.4</Version>
+    <Version>1.1.6</Version>
 
     <!-- 插件清单字段 -->
     <Author>Sparrow-prime</Author>
@@ -21,8 +21,8 @@
     <RootNamespace>FFXIVAutoBuyer</RootNamespace>
     <ApplicableVersion>any</ApplicableVersion>
 
-    <!-- 构建产物统一输出到 E:\Code\Output -->
-    <BaseOutputPath>E:\Code\Output\FFXIV-AutoBuyer\</BaseOutputPath>
+    <!-- 构建产物统一输出到 E:\Code\Work\.output；用 OutputPath 指定最终目录，避免 BaseOutputPath 自动再拼一层 Release -->
+    <OutputPath>E:\Code\Work\.output\FFXIV-AutoBuyer\</OutputPath>
 
     <NoWarn>1701;1702;CS0414;CS8601;CS8602;CS8604;CS8603;IDE1006;IDE0300;MSB3270;MSB324;CS0649;CA2211;CS8509;CS8625;MSB3305;CS8618;CS8600;CS8605;CS8620</NoWarn>
     <LangVersion>preview</LangVersion>

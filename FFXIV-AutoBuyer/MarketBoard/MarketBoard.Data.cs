@@ -195,7 +195,7 @@ public unsafe partial class MarketBoardModule
         /// 为什么需要：跨服后游戏客户端会把**上一服务器**的挂牌重新显示出来（在新世界首次请求市场数据、
         /// 列表重新加载那一刻最明显）。此时 <c>SearchItemId</c> 与物品一致、<c>IsFullyReceived()</c>
         /// 也成立，光靠这两条会把旧世界的挂牌当成新世界的实时数据读走 ——
-        /// 顶部「本服」卡片就会挂上上一服务器的价格（实机反馈的 1~2 秒错价）。
+        /// 旧世界价格会被写进「每服务器游戏内最低价」存储、并显示在在售列表里（实机反馈的 1~2 秒错价）。
         /// </para>
         /// 判据：当前挂牌的挂单 ID **全部**落在记忆集合里 ⇒ 仍是旧世界残留，不采信；
         /// 一旦出现记忆之外的挂单 ID（新世界的挂单不可能与旧世界重合），立即恢复采信并停止怀疑。
@@ -303,31 +303,113 @@ public unsafe partial class MarketBoardModule
         private const int CACHE_ENTRY_LIMIT = 2_000;
 
         /// <summary>
-        /// 「服务器（游戏内）」最低价短时缓存。
-        /// 跨服/刷新间隙游戏数据会短暂不可用，此时优先使用最近一次读到的服务器价格，
-        /// 避免回落到可能不准确的 Universalis 数据。
+        /// 每个世界「游戏内最低价」的**独立存储**（第六十二轮）。
+        /// <para>
+        /// 与 Universalis 网站数据彻底分开：本字典只保存**真实读到的游戏侧挂牌最低价**，
+        /// 键为「物品 × 世界 × HQ 过滤」，写入点只有两处（见 <see cref="RecordWorldGameMinPrice"/>）：
+        /// ① 购买流程每次取最低价时（<c>RecordCurrentWorldGameMinPrice</c>）；
+        /// ② 本服在售列表刷新并采纳新数据时（<c>GetLocalListingsDataSet</c>）。
+        /// 顶部价格卡片只从这里取「服务器价」，**不再**直接读 <c>InfoProxy->Listings</c>。
+        /// </para>
+        /// <para>
+        /// 跨服时**不清除**（键含世界 ID，不会冒充别的世界）；条目按 <see cref="GAME_MIN_PRICE_TTL_MS"/> 过期。
+        /// </para>
         /// </summary>
-        private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), (ulong MinPrice, long Tick)> gameMinPriceCache = [];
+        private readonly Dictionary<(uint ItemID, uint WorldID, bool HQOnly), (ulong MinPrice, long Tick)> worldGameMinPrice = [];
 
-        /// <summary>服务器最低价缓存有效期（毫秒）：半小时。</summary>
+        /// <summary>服务器最低价有效期（毫秒）：半小时。</summary>
         private const long GAME_MIN_PRICE_TTL_MS = 30 * 60 * 1000;
 
         /// <summary>
-        /// 只删除服务器最低价缓存中「指定世界」的所有条目（跨服时删目的地世界用，见 <see cref="InvalidateWorldData"/>）。
-        /// <para>
-        /// 为什么不是 <c>gameMinPriceCache.Clear()</c>：整体清空会连带丢掉其它世界（含刚离开的世界）
-        /// 最近一次真实读到的服务器价格，顶部价格信息块随即回落到滞后于网页的 Universalis 聚合数据。
-        /// </para>
+        /// 记录「当前世界 × 指定物品」的游戏内最低价（第六十二轮）。
+        /// 仅当游戏侧读数可采信时写入（跨服后尚未为新世界下发搜索 / 仍是旧世界挂牌时一律不写）。
         /// </summary>
-        private void RemoveGameMinPriceCacheEntriesForWorld
+        public void RecordCurrentWorldGameMinPrice
         (
-            uint worldID
+            uint itemID
         )
         {
-            if (worldID == 0) return;
+            var info = InfoProxy;
 
-            foreach (var key in gameMinPriceCache.Keys.Where(key => key.WorldID == worldID).ToList())
-                gameMinPriceCache.Remove(key);
+            if (info == null || itemID == 0 || !IsGameMarketDataUsable(itemID)) return;
+
+            RecordWorldGameMinPrice(itemID, CurrentWorldID, info->Listings.ToArray());
+        }
+
+        /// <summary>
+        /// 购买成功后立即刷新「当前世界 × 物品」的游戏内最低价（第六十二轮修补）。
+        /// <para>
+        /// 与 <see cref="RecordCurrentWorldGameMinPrice"/> 的区别：**不要求** <c>IsFullyReceived()</c> ——
+        /// 购买成功后游戏侧会短暂进入「未完整接收」状态（它自己在更新列表），
+        /// 若在那时跳过，卡片会一直停在刚买走的价格上，直到下一次刷新（实机反馈「买完最低价没变化」）。
+        /// 只保留「不跨服 / 不是旧世界残留」两道硬护栏；写入时会排除本地已购挂单（见 RecordWorldGameMinPrice）。
+        /// </para>
+        /// </summary>
+        public void RefreshCurrentWorldGameMinPriceAfterPurchase
+        (
+            uint itemID
+        )
+        {
+            var info = InfoProxy;
+
+            if (info == null || itemID == 0 || pendingWorldResyncSearch || IsWorldResyncStaleReading()) return;
+
+            RecordWorldGameMinPrice(itemID, CurrentWorldID, info->Listings.ToArray());
+        }
+
+        /// <summary>
+        /// 从一批游戏侧挂牌里取最低价，写入「每服务器游戏内最低价」存储（同时写「全部」与「仅 HQ」两个键）。
+        /// 已在本地隐藏的已购挂单不参与计算 —— 它们已经买不到，卡片应显示下一个仍可购买的最低价。
+        /// 只在最低价真的变化时标脏 / 强制重建卡片，避免购买循环里反复重排卡片。
+        /// </summary>
+        private void RecordWorldGameMinPrice
+        (
+            uint                              itemID,
+            uint                              worldID,
+            IReadOnlyList<MarketBoardListing> listings
+        )
+        {
+            if (itemID == 0 || worldID == 0 || listings.Count == 0) return;
+
+            var anyMin = ulong.MaxValue;
+            var hqMin  = ulong.MaxValue;
+
+            foreach (var listing in listings)
+            {
+                if (listing.ItemId != itemID || listing.UnitPrice == 0) continue;
+
+                // 已购 / 已本地隐藏的挂单不再参与「当前最低价」
+                if (IsListingPurchased(listing.ListingId)) continue;
+
+                if (listing.UnitPrice < anyMin) anyMin = listing.UnitPrice;
+                if (listing.IsHqItem && listing.UnitPrice < hqMin) hqMin = listing.UnitPrice;
+            }
+
+            if (anyMin == ulong.MaxValue) return;
+
+            var now     = Environment.TickCount64;
+            var changed = false;
+
+            if (!worldGameMinPrice.TryGetValue((itemID, worldID, false), out var oldAnyPrice) ||
+                oldAnyPrice.MinPrice != anyMin)
+                changed = true;
+
+            worldGameMinPrice[(itemID, worldID, false)] = (anyMin, now);
+
+            // 没有 HQ 在售时保留上一次的 HQ 读数（数据存在就优先于网站价；过期由 TTL 处理）
+            if (hqMin != ulong.MaxValue)
+            {
+                if (!worldGameMinPrice.TryGetValue((itemID, worldID, true), out var oldHqPrice) ||
+                    oldHqPrice.MinPrice != hqMin)
+                    changed = true;
+
+                worldGameMinPrice[(itemID, worldID, true)] = (hqMin, now);
+            }
+
+            if (!changed) return;
+
+            worldPriceTableDirty   = true;
+            forcePriceTableRebuild = true;
         }
 
         /// <summary>聚合数据的请求记录（分批遍历时跳过已请求过的世界，避免配额被前几个世界反复占用）。</summary>
@@ -394,7 +476,7 @@ public unsafe partial class MarketBoardModule
         /// </summary>
         public static bool DiagnosticsEnabled;
 
-        /// <summary>诊断日志（默认关闭，开启时限流输出）。</summary>
+        /// <summary>诊断日志（默认关闭，开启时限流输出；级别 Debug，避免刷警告）。</summary>
         public static void DiagLog
         (
             string message
@@ -419,7 +501,7 @@ public unsafe partial class MarketBoardModule
 
             diagSuppressedCount = 0;
 
-            DLog.Warning($"[AutoBuyer][诊断] {message}{suffix}");
+            DLog.Debug($"[AutoBuyer][诊断] {message}{suffix}");
         }
 
         /// <summary>
@@ -430,9 +512,18 @@ public unsafe partial class MarketBoardModule
         /// 就完全无法判断「检测有没有读到日志、读到的是哪一条、走的是哪条路」——
         /// 因此这里始终输出，代价可忽略。
         /// </para>
+        /// 级别 **Info**：跨服 / 列表刷新属于普通工作，不应以 Warning 刷屏（第六十二轮清理）；
+        /// 真正的异常（如重搜索被服务器拒绝）走 <see cref="WorldWarn"/>。
         /// 固定前缀 <c>[AutoBuyer][跨服]</c>：游戏内用 <c>/xllog</c> 过滤该前缀即可。
         /// </summary>
         public static void WorldLog
+        (
+            string message
+        ) =>
+            DLog.Info($"[AutoBuyer][跨服] {message}");
+
+        /// <summary>跨服链路中的**异常**（Warning 级），与普通流程日志 <see cref="WorldLog"/> 分开。</summary>
+        public static void WorldWarn
         (
             string message
         ) =>
@@ -443,11 +534,19 @@ public unsafe partial class MarketBoardModule
         /// <para>
         /// 用途：跨世界行情（Universalis 聚合）取不到数据时，必须让玩家看得见原因与后续动作 ——
         /// 否则界面只是「某几个世界没有价格」，无从判断是上游失败、被节流还是仍在重试。
-        /// 事件稀疏（每次失败一条），因此始终输出。
         /// </para>
+        /// 级别 **Info**：价格卡片重建、数据就绪、本轮请求数等属于普通工作（第六十二轮清理）；
+        /// 真正的异常（请求失败、服务器拒绝、上游没算出来）走 <see cref="DataWarn"/>。
         /// 固定前缀 <c>[AutoBuyer][数据]</c>。
         /// </summary>
         public static void DataLog
+        (
+            string message
+        ) =>
+            DLog.Info($"[AutoBuyer][数据] {message}");
+
+        /// <summary>行情链路中的**异常**（Warning 级），与普通流程日志 <see cref="DataLog"/> 分开。</summary>
+        public static void DataWarn
         (
             string message
         ) =>
@@ -595,14 +694,14 @@ public unsafe partial class MarketBoardModule
         /// <summary>
         /// 游戏侧市场数据在当前世界是否可用。
         /// 跨服后必须先观察到「清空 → 重新到齐」的完整循环：游戏侧在跨服瞬间仍持有
-        /// 上一服务器的挂牌，若直接采用会把旧服务器价格显示（并缓存）成本服数据。
+        /// 上一服务器的挂牌，若直接采用会把旧服务器价格当成并写进「每服务器游戏内最低价」存储。
         /// <para>
         /// ⚠ 单靠 <c>IsFullyReceived()</c> **挡不住**跨服瞬间的残留挂牌：它对
         /// 「<c>EntryCount == 0</c>」（一条数据都没有）返回 **true**，
         /// 而 `ClearListData()` 制造的正是这个状态（详见 `CHANGELOG.md` 第四十七轮）。
         /// 因此必须叠加 <c>!pendingWorldResyncSearch</c>：跨服后**尚未**为新世界真正下发过搜索之前，
         /// 游戏侧读数一律不认 —— 否则上一服务器的挂牌会被当成新服务器的读数，
-        /// 并被写进服务器最低价缓存（半小时内优先于 Universalis 显示）。
+        /// 并被写进游戏内最低价存储（半小时内优先于 Universalis 显示）。
         /// </para>
         /// </summary>
         private bool IsGameMarketDataUsable
@@ -691,9 +790,10 @@ public unsafe partial class MarketBoardModule
         /// 与 <see cref="ResyncAfterWorldChange"/> 的区别：本方法在发现世界变化的当帧即执行，
         /// 不去抖等待；世界重同步仍按原节奏处理（用于锚定世界目录与补拉标记）。
         /// <para>
-        /// 口径：**先删除缓存列表数据，再重新获取**。旧世界的挂牌 / 由它派生的一切缓存
-        /// 都在这里整体作废，之后由补拉机制为新世界取回数据 ——
-        /// 否则旧服务器的读数会被当成新服务器的价格显示、并被缓存半小时。
+        /// 口径：**先删除缓存列表数据，再重新获取**。旧世界的挂牌 / 由它派生的本地列表与派生集
+        /// 在这里整体作废，之后由补拉机制为新世界取回数据 —— 否则旧服务器的读数会被当成新服务器的价格。
+        /// 「每服务器游戏内最低价」独立存储**不在这里清除**（它只由购买 / 本服列表刷新写入，键含世界 ID），
+        /// 详见方法内注释。
         /// </para>
         /// </summary>
         public void InvalidateWorldData
@@ -759,23 +859,18 @@ public unsafe partial class MarketBoardModule
             localListingsBaseline    = default;
             localSearchRetryAttempts = 0;
 
-            // ── 先删除缓存列表数据 ──
-            // ① 由游戏列表 / 挂牌派生的缓存整体作废；
-            // ② 「服务器最低价缓存」整体**保留**，只删「本次目的地（= 新当前世界）」的条目。
+            // ── 先删除缓存列表数据，但**不动**「每服务器游戏内最低价」存储 ──
+            // ① 由游戏列表 / 挂牌派生的缓存（本地列表、派生集）整体作废；
+            // ② 「每服务器游戏内最低价」独立存储（worldGameMinPrice）**整体保留**：
+            //    它只由「购买时 / 本服在售列表刷新时」写入（见 RecordWorldGameMinPrice），
+            //    键含世界 ID；跨服时删任何条目都只会让对应世界的卡片回落到更滞后的 Universalis
+            //    网站价（第五十九 / 六十一轮两次教训）。
             //
-            // 为什么不整体清（第五十九轮）：该缓存是顶部价格信息块（三低/三高卡片）在本服读不到游戏数据时的
-            // 「服务器价」来源。整体清空会让所有尚未重新读到的世界（含新世界）立刻回落到 Universalis 聚合，
-            // 而聚合接口明显滞后于其网页、更滞后于游戏读数 —— 表现为「跨服后卡片只能显示落后的网站数据」。
-            //
-            // 保留为什么不会重现第五十三轮的跨服错价：旧世界读数被写进**新世界键**那条路已由两道护栏堵死 ——
-            // 「跨服后尚未为新世界下发过搜索 → 不采信游戏侧读数」（!pendingWorldResyncSearch）
-            // 与「挂牌 ID 全部来自跨服瞬间记忆 → 不采信」（IsWorldResyncStaleReading）；
-            // 两条都成立时 gameMinPriceCache 不会被写入任何读数，缓存里也不会凭空出现新世界的价格。
-            // 而每个键都带世界 ID，旧世界条目只会显示在**旧世界自己的卡片**上（属于该世界自己的历史读数）。
-            // 目的世界条目仍然删掉：那些通常是从网站回落写入的「非服务器读数」，
-            // 删掉才能保证新世界的卡片优先显示游戏数据，而不是旧一次的网站数值。
+            // 顶部价格卡片不再直接读 InfoProxy->Listings（第六十二轮）：跨服时的旧世界残留读数
+            // 不会再进入卡片。写入路径本身仍受两道护栏保护 ——「跨服后尚未为新世界下发搜索
+            // → 不采信游戏侧读数」（!pendingWorldResyncSearch）与「挂牌 ID 全部来自跨服瞬间记忆
+            // → 不采信」（IsWorldResyncStaleReading），因此存储里不会出现「旧世界价格冒充新世界」。
             ClearDerivedCaches();
-            RemoveGameMinPriceCacheEntriesForWorld(CurrentWorldID);
 
             // 卡片区立刻重建一次（不受 3 秒节流限制），否则旧排名/空白会多停留几秒
             forcePriceTableRebuild = true;
@@ -886,7 +981,7 @@ public unsafe partial class MarketBoardModule
 
             DiagLog($"服务器拒绝市场数据请求，进入 {MARKET_REJECTION_COOLDOWN_MS / 1000} 秒静默冷却");
 
-            MarketDataProvider.DataLog
+            MarketDataProvider.DataWarn
             (
                 $"[布告板搜索] 服务器拒绝请求（请稍后再次确认）→ 静默 {MARKET_REJECTION_COOLDOWN_MS / 1000} 秒后自动重试"
                 + (SelectedItemID != 0 ? $"，当前物品 item={SelectedItemID}" : string.Empty)
@@ -902,7 +997,7 @@ public unsafe partial class MarketBoardModule
 
             if (pendingWorldResyncSearch)
             {
-                MarketDataProvider.WorldLog("[列表] 跨服后的重搜索被服务器拒绝 → 冷却结束后自动重试");
+                MarketDataProvider.WorldWarn("[列表] 跨服后的重搜索被服务器拒绝 → 冷却结束后自动重试");
             }
         }
 
@@ -1550,12 +1645,16 @@ public unsafe partial class MarketBoardModule
 
                                 if (isFirstHandling)
                                 {
-                                    MarketDataProvider.DataLog
-                                    (
-                                        isPermanentMiss ?
-                                            $"[世界行情] 上游无该数据（不再重试）：world={worldID}（{worldName}）item={itemID}" :
+                                    if (isPermanentMiss)
+                                        MarketDataProvider.DataLog
+                                        (
+                                            $"[世界行情] 上游无该数据（不再重试）：world={worldID}（{worldName}）item={itemID}"
+                                        );
+                                    else
+                                        MarketDataProvider.DataWarn
+                                        (
                                             $"[世界行情] 获取失败，{AGGREGATED_FAILURE_RETRY_DELAY_MS / 1000} 秒后自动重试：world={worldID}（{worldName}）item={itemID}"
-                                    );
+                                        );
                                 }
 
                                 return;
@@ -1583,7 +1682,7 @@ public unsafe partial class MarketBoardModule
                                 {
                                     var failedFlag = data.FailedItems.Contains(itemID) ? "failedItems" : "空结果";
 
-                                    MarketDataProvider.DataLog
+                                    MarketDataProvider.DataWarn
                                     (
                                         $"[世界行情] 上游未返回该物品数据（{failedFlag}），{AGGREGATED_FAILURE_RETRY_DELAY_MS / 1000} 秒后自动重试：world={worldID}（{worldName}）item={itemID}"
                                     );
@@ -1798,11 +1897,9 @@ public unsafe partial class MarketBoardModule
         {
             // 先推进「世界数据是否可用」的状态机：否则跨服后可能因提前 return
             // 而永远观察不到「未就绪 → 到齐」，导致列表一直不显示。
-            // 注意：跨服后的「尚未下发重搜索」阶段必须视为**不可用** —— 此时游戏侧可能处于
-            // 清空状态，而 IsFullyReceived() 对 EntryCount == 0 返回 true（空 = 已完整接收），
-            // 若当成可用数据，界面会以空列表收场、补拉同时被取消，新世界的列表就再也取不回来。
+            // `IsGameMarketDataUsable` 已包含「跨服后尚未下发重搜索 → 不可用」（pendingWorldResyncSearch）
+            // 与「仍是旧世界挂牌 → 不可用」，这里只额外叠加服务器拒绝后的静默冷却。
             var gameDataUsable = IsGameMarketDataUsable(info->SearchItemId) &&
-                                 !pendingWorldResyncSearch                   &&
                                  !IsMarketRejectionCoolingDown;
 
             if (localListingsStale && !gameDataUsable)
@@ -1880,12 +1977,13 @@ public unsafe partial class MarketBoardModule
 
             localListingsFingerprint = fingerprint;
             localListingsData        = BuildLocalListingsDataSet(info->SearchItemId, sourceListings);
-            worldPriceTableDirty     = true;
 
-            // 新世界数据刚被采纳 → 卡片区**立刻**重建（第五十八轮）：
-            // 否则「本服」卡片会继续挂着上一次重建时的旧价格最多 3 秒（3 秒节流），
-            // 表现为跨服后列表已经加载完、卡片却还停在一两秒前的数值。
-            forcePriceTableRebuild   = true;
+            // 本服在售列表刷新并采纳了新数据 → 同步更新「每服务器游戏内最低价」存储（第六十二轮）。
+            // 只能在这里写：本分支已通过 IsGameMarketDataUsable（含跨服两道护栏）。
+            // 卡片何时重建由 RecordWorldGameMinPrice 在「最低价真的变化」时标脏 / 强制重建；
+            // 这里**不要**再无脑置脏 —— 列表条数 / 数量变化并不等于价格变化，否则卡片会被无谓重排。
+            RecordWorldGameMinPrice(info->SearchItemId, CurrentWorldID, sourceListings);
+
             pendingImplicitRefresh   = false;
 
             // 成功取回并采纳了本物品的数据 → 补拉完成（此后不再重复请求，避免游戏列表被反复刷新）
@@ -2046,8 +2144,7 @@ public unsafe partial class MarketBoardModule
             var stateChanged = itemChanged                                          ||
                                priceTableRegion        != regionName                ||
                                priceTableHQOnly        != HQOnly                    ||
-                               priceTableOnlyCurrentDC != owner.config.OnlyCurrentDC ||
-                               (InfoProxy != null && InfoProxy->EntryCount > 0 && cachedDCWorldPrices.Count == 0);
+                               priceTableOnlyCurrentDC != owner.config.OnlyCurrentDC;
             // 注意：Throttler 默认仅 500ms，而跨服/启动时 28 个世界的最低价会陆续到达，
             // 若按默认节流会让卡片区以 ~2 次/秒的频率重排（表现为「连续刷新」），故放宽到 3 秒。
             // 例外：旧数据刚被整体作废（跨服 / 手动刷新）时不等待 —— 越早重建，越早脱离旧读数。
@@ -2073,34 +2170,14 @@ public unsafe partial class MarketBoardModule
                     {
                         var minPrice = ulong.MaxValue;
 
-                        // 1) 当前世界：服务器实时数据（游戏内市场列表）
-                        if (worldID == CurrentWorldID && IsGameMarketDataUsable(itemID))
-                        {
-                            var listings = InfoProxy->Listings.ToArray()
-                                                              .Where
-                                                              (x => x.ItemId    == itemID &&
-                                                                    x.UnitPrice > 0       &&
-                                                                    (x.IsHqItem || !HQOnly)
-                                                              )
-                                                              .ToList();
+                        // 1) 每服务器「游戏内最低价」独立存储（第六十二轮）：
+                        //    只由「购买时 / 本服列表刷新时」写入，卡片这里**不再**直接读挂单数据。
+                        //    条目有效期半小时；跨服时不清除（键含世界 ID）。
+                        if (worldGameMinPrice.TryGetValue((itemID, worldID, HQOnly), out var gamePrice) &&
+                            Environment.TickCount64 - gamePrice.Tick < GAME_MIN_PRICE_TTL_MS)
+                            minPrice = gamePrice.MinPrice;
 
-                            if (listings.Count > 0)
-                            {
-                                minPrice = listings.Min(x => x.UnitPrice);
-
-                                // 记录「服务器最低价」缓存（半小时内有效）
-                                gameMinPriceCache[(itemID, worldID, HQOnly)] = (minPrice, Environment.TickCount64);
-                            }
-                        }
-
-                        // 2) 服务器最低价缓存：半小时内优先于 Universalis 显示
-                        //    （跨服/刷新间隙游戏数据短暂不可用时，沿用最近一次读到的服务器价格）
-                        if (minPrice == ulong.MaxValue                                              &&
-                            gameMinPriceCache.TryGetValue((itemID, worldID, HQOnly), out var cachedGamePrice) &&
-                            Environment.TickCount64 - cachedGamePrice.Tick < GAME_MIN_PRICE_TTL_MS)
-                            minPrice = cachedGamePrice.MinPrice;
-
-                        // 3) 最后才回落到 Universalis 聚合数据
+                        // 2) 存储里没有该世界的数据时，才回落到 Universalis 聚合
                         if (minPrice == ulong.MaxValue)
                             _ = TryGetOnlineAggregatedMinPrice(itemID, worldID, out minPrice);
 
@@ -2136,7 +2213,7 @@ public unsafe partial class MarketBoardModule
                 // 目的：卡片缺数据时能一眼看出是「请求没发出 / 上游没给 / 采纳失败」，不必再靠猜。
                 var validWorldCount      = worldPriceRanks?.Valid.Count ?? 0;
                 var aggregatedWorldCount = onlineAggregatedCache.Keys.Count(key => key.ItemID == itemID);
-                var gamePriceWorldCount  = gameMinPriceCache.Keys.Count(key => key.ItemID == itemID);
+                var gamePriceWorldCount  = worldGameMinPrice.Keys.Count(key => key.ItemID == itemID);
 
                 if (itemID != 0 && priceCardLoggedItemID != itemID)
                 {
@@ -2145,7 +2222,7 @@ public unsafe partial class MarketBoardModule
                     MarketDataProvider.DataLog
                     (
                         $"[价格卡片] item={itemID} 重建：有效世界 {validWorldCount}/{cachedDCWorldPrices.Sum(dc => dc.Value.Count)}"
-                        + $"（聚合缓存 {aggregatedWorldCount} 个世界，服务器价缓存 {gamePriceWorldCount} 个世界）"
+                        + $"（聚合缓存 {aggregatedWorldCount} 个世界，游戏内最低价存储 {gamePriceWorldCount} 个世界）"
                     );
                 }
                 else if (itemID != 0 && validWorldCount > 0 && priceCardReadyLoggedItemID != itemID)

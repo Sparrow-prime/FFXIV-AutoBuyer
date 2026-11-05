@@ -17,6 +17,8 @@
 | 1.1.2 | 2026-09-24 | §1.1.2 | `6d50976` ／ tag `1.1.2` |
 | 1.1.3 | 2026-10-01 | §1.1.3 | `73ae5bd` ／ tag `1.1.3` |
 | 1.1.4 | 2026-10-02 | §1.1.4 | `8c016fd` ／ tag `1.1.4` |
+| 1.1.5 | 2026-11-05 | §1.1.5 | 本地中间版本，未推送 |
+| 1.1.6 | 2026-11-05 | §1.1.6 | 本地修复，未推送 |
 
 **版本归属的口径与限度（如实说明）**：第五轮之前的逐轮记录，原文（`测试文档.md` §四~§七、`设计文档.md` §十五~§十七）只注明日期、未注明所属版本，无法凭原文可靠判定每轮落在哪个 tag 内；本节按**日期先后**排入相邻版本，凡原文未明示者一律不臆断，均列在对应版本下并标注轮次与日期。第五轮及以后各轮的版本归属以原文为准。
 
@@ -1191,6 +1193,8 @@ if (data.Results.All(x => x.ItemID != itemID))
 | 1 | `InvalidateWorldData()` 不再 `gameMinPriceCache.Clear()`，改为只删「目的地世界（= 新当前世界）」的条目（新增 `RemoveGameMinPriceCacheEntriesForWorld(worldID)`）；其余世界的服务器价保留至 TTL 到期 | `MarketBoard.Data.cs` |
 | 2 | 目的地世界的条目仍然删除：它们通常是从网站回落写入的**非服务器读数**，删掉才能保证新世界卡片优先显示游戏数据，而不是旧一次的网站数值 | 同上 |
 | 3 | 设计文档 §14.1 / §14.4 的「跨服时清空服务器最低价缓存」口径同步修正为「只删目的地世界」 | `设计文档.md` |
+
+> 口径更正（第六十一轮）：上表第 2 条的「目的地条目通常是从网站回落写入的**非服务器读数**」**不成立** —— `gameMinPriceCache` 只有「真的读到游戏侧挂牌」一个写入点，目的地的条目同样属于该世界自己的服务器读数。删掉它会让回程 / 往返后的本服卡片回落网站价，第六十一轮已改为「跨服时不删任何条目」。
 | 4 | **定位前提的口径更正**（用户本轮同时指出）：本插件**替代布告板界面**，本地搜索不需要玩家站在布告板前。据此改写三处会误导后续排查的注释/文案：`waitingBoardAfterWorldChange` 的说明（等的是**过场结束**，不是玩家走到布告板）、补拉参数块（跨服后唯一等待来源是 `IsPlayerTransitioning`）、跨服日志「跨服后布告板已可用 → 立即发起搜索」→「跨服后已可发起本地搜索（过场结束）→ 立即发起搜索」；并修正第五十八轮「走到布告板」与第二十五轮「走过去通常远超 15 秒」两处错误依据 | `MarketBoard.Data.cs`、`MarketBoardModule.cs`、`CHANGELOG.md`（本轮）、`CHANGELOG.md`（第二十五轮附口径更正）、`设计文档.md`、`测试文档.md` |
 
 **未采用（本轮刻意不做）**：
@@ -1254,6 +1258,117 @@ if (data.Results.All(x => x.ItemID != itemID))
 **Release** <https://github.com/Sparrow-prime/FFXIV-AutoBuyer/releases/tag/1.1.4>（标题 `1.1.4`，正文 752 字符，已线上核对无乱码）
 **附件** `latest.zip` **401,804 B**（SHA256 `FF78E8A51EEF7D69B4F769D62B865ECE653CEE2AA71E78193E7A9EDB591461A4`；GitHub 侧资产 `digest=sha256:ff78e8a5…61a4` 与本地一致），内含 `AutoBuyer.dll` 152,064 B（SHA256 `EA5D9544…F85A2`）、`AutoBuyer.json`、`AutoBuyer.deps.json`、`Localization/zh-CN.json`、`OmenTools.dll`、`DailyRoutines.Common.dll`、`TinyPinyin.dll`
 **推送方式**：HTTPS + Token（`E:\Code\Personal file\github_token.txt`，仅在内联脚本中展开、输出已脱敏；未写入 `.git/config`、未落盘、未回显）。本机 SSH（22 端口）沿用上轮结论仍被网络环境拦截，故走 HTTPS。
+
+---
+
+## 1.1.5（2026-11-05）
+
+### 第六十一轮：跨服仍把「目的地世界」的服务器价清掉，回程 / 往返后顶部卡片回落网站价（2026-11-05）
+
+**现象**（用户原话）：
+
+> 「autobuyer好像有个问题，就是跨服清数据的时候把最低价也清掉了导致顶部卡片价格变成不准确的网站数据」
+
+**根因（第五十九轮修复的残留）**：
+
+第五十九轮把 `gameMinPriceCache.Clear()`（整体清空）改成了「只删目的地世界」——理由是目的地条目「通常是从网站回落写入的非服务器读数」。这个理由不成立：
+
+- `gameMinPriceCache` 只有**一个写入点**：`GetWorldPriceRanks()` 第 1 段，仅当 `worldID == CurrentWorldID`、`IsGameMarketDataUsable(itemID)` 为真、并且真的读到 `listings.Count > 0` 时才写入；
+- Universalis 聚合只作为「读不到时的回落」参与**显示**，从不写回该缓存。
+
+因此目的地世界的条目同样是**该世界自己上一次真实读到的服务器价**。跨服时删掉它 → `cachedDCWorldPrices` 立刻整体重建（`forcePriceTableRebuild`），而此刻游戏侧数据尚不可采信（`pendingWorldResyncSearch` 为真）→ 该世界卡片只能落到 `TryGetOnlineAggregatedMinPrice()`（Universalis 聚合，明显滞后于其网页）→ 顶部「本服 / 最低价」卡片显示不准确的网站数据，直到过场结束、补拉搜索返回（通常数秒）。
+
+最容易命中的是**回程与往返**：玩家从 A 去 B 买完再回 A，A 是目的地，A 的服务器价被删；而 A 往往正是顶部卡片里的「最低价」，于是「最低价卡片」直接变成网站价。
+
+**处置**：
+
+| # | 措施 | 位置 |
+| ---- | ---- | ---- |
+| 1 | 删除 `RemoveGameMinPriceCacheEntriesForWorld()` 及其调用；`InvalidateWorldData()` 改为**保留全部**服务器最低价缓存条目（含目的地世界）——该缓存只由真实游戏读数写入，键里带世界 ID，没有条目会冒充别的世界 | `MarketBoard.Data.cs` |
+| 2 | 字段注释与 `InvalidateWorldData()` 的说明改写成「写入点唯一 + 两道护栏」，并记录第五十九轮只保留其它世界为什么不够 | 同上 |
+| 3 | 设计文档 §6.3 / §14.1 / §14.4 与对应决策表同步为「跨服不删任何条目」 | `设计文档.md` |
+
+**为什么不会重现第五十三 / 五十八轮的跨服错价**：旧世界读数被写进**新世界键**那条路仍由两道护栏堵死 —— 「跨服后尚未为新世界下发过搜索 → 不采信游戏侧读数」（`!pendingWorldResyncSearch`）与「挂牌 ID 全部来自跨服瞬间记忆 → 不采信」（`IsWorldResyncStaleReading`）。两道都成立时缓存不会被写入任何读数。
+
+**行为变化（供实机观察）**：跨服后顶部价格信息块（含本服 / 最低价 / 最高价卡片）应立即显示各世界**上一次真实读到的服务器价**，包括本次目的地世界；随后被新世界的游戏读数覆盖。若目的地世界在本会话内**从未**读到过游戏数据（例如首次前往），则没有可用的服务器读数，仍会短暂回落到网站价，直到游戏读数回来 —— 这属于「确实没有服务器读数」，不在本轮修复范围（若要把这段也改成「不显示」需另行确认）。
+
+**构建与产物**：`dotnet build FFXIV-AutoBuyer\FFXIV-AutoBuyer.csproj -c Release` → **0 错误**（另有 2 条 `NU1900`：NuGet 漏洞数据源不可达的环境警告，与代码无关）；`AutoBuyer.dll` **151,552 B**（SHA256 `987BA5F3B9F8E272A187CA59F719893129511534164D4B189FF886FC8B4063BA`），落 `E:\Code\Work\.output\FFXIV-AutoBuyer\`；清单 `AssemblyVersion` = `1.1.5.0`。
+
+**版本号** 清单 `1.1.4` → **`1.1.5`**（修复：z 位递增；本版本未推送，作为中间版本保留记录）
+
+**测试**：本版本未单独测试 / 推送；与 1.1.6 一并测试与发布，见 `测试文档.md`（2026-11-05）。
+
+> 后续（第六十二轮）：价格卡片改为只读「每服务器游戏内最低价」独立存储，`GetWorldPriceRanks()` 不再直接读挂单；本轮的「跨服保留」结论仍然成立并成为该存储的前提。
+
+---
+
+## 1.1.6（2026-11-05）
+
+### 第六十二轮：价格卡片与挂单数据解耦，改为「每服务器游戏内最低价」独立存储（2026-11-05）
+
+**需求**（用户原话）：
+
+> 「考虑一种方法：每服务器的游戏内最低价数据单独储存，每次购买行为均读取当前最低价更新数据，数据存在时取代网站最低价展示，取消原来的直接用挂单数据的方法」
+
+**问题背景**：第五十三 / 五十八 / 五十九 / 六十一轮反复围绕「卡片读到的挂单属于哪个世界」修补，根因是**卡片在重建时直接读 `InfoProxy->Listings`**——这份数据在跨服瞬间、过场、购买刷新期间都可能是旧世界残留，于是不得不同时维护挂单 ID 记忆、搜索下发标记、缓存保留策略。规则越多，越容易在下一处路径漏掉。
+
+**方案（本轮落地）**：
+
+| # | 措施 | 位置 |
+| ---- | ---- | ---- |
+| 1 | 新增「每服务器游戏内最低价」独立存储 `worldGameMinPrice`（键 = 物品 × 世界 × HQ 过滤；值 = 最低价 + 观测时刻；TTL 30 分钟；仅内存，不跨会话） | `MarketBoard.Data.cs` |
+| 2 | 写入点只有两处，且都受 `IsGameMarketDataUsable`（含 `!pendingWorldResyncSearch` + 挂单 ID 记忆）保护：① **每次购买**取最低价前（`RecordCurrentWorldGameMinPrice`）；② **本服在售列表刷新并采纳新数据时**（`RecordWorldGameMinPrice`） | `MarketBoard.Data.cs` / `MarketBoard.Purchase.cs` |
+| 3 | 同一快照同时写「全部最低价」与「仅 HQ 最低价」两个键；无 HQ 在售时保留上一次 HQ 读数（由 TTL 过期） | 同上 |
+| 4 | `GetWorldPriceRanks()` **删除**「当前世界直接读挂单 + 写缓存」整段；每个世界改为「存储（优先）→ Universalis（回落）」 | 同上 |
+| 5 | 价格卡片不再依赖 `pendingWorldResyncSearch` / 挂单 ID 记忆（这两道护栏仍用于在售列表与购买路径） | 同上 |
+| 6 | 存储跨服**整体保留**（延续第五十九 / 六十一轮结论）；跨服仍清 `cachedDCWorldPrices` 并强制重建，但重建只读存储 + 网站数据 | 同上 |
+| 7 | 存储最低价变化时置 `worldPriceTableDirty` + `forcePriceTableRebuild`，卡片立即更新（购买后立刻可见） | 同上 |
+
+**行为变化（供实机观察）**：
+
+- 买过一次的世界/物品：顶部卡片显示**你实际观测到的服务器价**（跨服往返不掉回网站价）；
+- 本服在售列表刷新后：卡片同步更新为最新服务器价；
+- 从未购买、也没刷新过该物品的世界：卡片仍显示 Universalis 网站价（「数据存在才取代」的必然结果）；
+- 卡片不再因为「游戏侧数据暂时不可用」而空白或回落——它完全不看游戏侧状态。
+
+**刻意不做**：不把存储写进配置文件（不跨会话持久化，避免隔天旧价冒充现价）；不改变 30 分钟 TTL；不改购买流程的 `FindCheapestListing`（购买必须读挂单）。
+
+**补充修复（实机反馈 2026-11-05 13:18：「买完以后最低价未变化」）**：
+
+| # | 根因 | 处置 |
+| ---- | ---- | ---- |
+| 1 | 存储取最低价时**没有排除本地已购挂单**：购买成功后游戏侧列表不会自动刷新，被买走的挂单仍留在 `InfoProxy->Listings` 里，于是「当前最低价」一直是刚买走的那条 | `RecordWorldGameMinPrice` 计算时跳过 `IsListingPurchased(listing.ListingId)` |
+| 2 | 购买后没有主动刷新存储；下一次购买迭代才会读，若目标数量已达成则根本不会再有下一次 | 成功分支 `MarkListingPurchased(...)` 之后调用 `RefreshCurrentWorldGameMinPriceAfterPurchase(...)`，立即用「剩余在售」重算 |
+| 3 | 购买成功后游戏侧会短暂进入 `IsFullyReceived() == false`（它自己在更新列表），若复用 `RecordCurrentWorldGameMinPrice` 会被跳过 | 新增 `RefreshCurrentWorldGameMinPriceAfterPurchase`：只保留「不跨服 / 非旧世界残留」两道硬护栏，**不**要求 `IsFullyReceived()` |
+| 4 | **最后一次购买刚好达成目标**时，`PurchaseStep` 先走「达到目标 → 完成」并 `return`，后面的成功分支（隐藏挂单 + 刷新最低价）根本不会执行 —— 实机「买完最低价不变」最可能命中的就是这条 | 把「等待上一次购买生效」的结算移到目标检查**之前**；成功结算后继续走目标检查，达成目标时也保留「隐藏挂单 + 刷新最低价」 |
+
+**补充后的行为**：买走当前最低价挂单 → 卡片立即改为**下一个仍可购买的最低价**；若下一个挂单价格相同（或购买未买走该挂单），卡片价格保持——这是正确结果。
+
+**顺手清理（价格链路，2026-11-05）**：
+
+| # | 清理项 | 原因 |
+| ---- | ---- | ---- |
+| 1 | 删除 `GetLocalListingsDataSet` 里的无条件 `worldPriceTableDirty = true` / `forcePriceTableRebuild = true` | 卡片数据已不依赖本地列表；重建改由 `RecordWorldGameMinPrice` 在「最低价真的变化」时触发，避免条数/数量变化导致卡片无谓重排（原第五十八轮的注释一并删除） |
+| 2 | 删除 `GetLocalListingsDataSet` 里重复的 `&& !pendingWorldResyncSearch` | `IsGameMarketDataUsable` 内部已包含该判定 |
+| 3 | 修正过时注释：`InvalidateWorldData`（不再「整份缓存作废」）、挂单 ID 记忆（后果从「卡片错价」改为「写进存储 / 列表」）、`GetAggregatedMarketScope`（卡片统计与均价计算早已移除） | 避免注释把旧机制当成现行设计 |
+| 4 | `测试文档.md` §2.8 的符号检查改为第六十二轮的新方法，并标注待 1.1.6 测试重跑 | 原文引用的 `RemoveGameMinPriceCacheEntriesForWorld` 已被删除 |
+
+**日志分级（2026-11-05，实机反馈「跳了不少日志」）**：
+
+| 级别 | 内容 | 实现 |
+| ---- | ---- | ---- |
+| **Info**（普通工作，不再刷警告） | 加载自检、跨服检测、世界切换、列表就绪、价格卡片重建 / 数据就绪、本轮行情请求数、上游「无该数据」 | 自检改 `DLog.Info`；`WorldLog` / `DataLog` 底层改 Info；新增 `WorldWarn` / `DataWarn` 承载异常 |
+| **Warning**（真正的异常） | 服务器拒绝请求、跨服后重搜索被拒、上游请求失败 / 未返回该物品 | 对应调用点改走 `WorldWarn` / `DataWarn` |
+| **Debug** | `EnableDiagnostics` 打开的诊断日志 | `DiagLog` 由 Warning 改 Debug |
+| **Error**（不变） | Universalis 请求异常、回调异常、目录获取失败 | 保持 `DLog.Error` |
+
+> 需要 `DLog.Info`：上游 OmenTools 的 `DLog` 只有 `Verbose` / `Debug` / `Warning` / `Error`，本轮在 `lib/OmenTools/Dalamud/DLog.cs` 补了 `Info`（登记为 `lib/FROZEN.md` 的 D18 与 `设计文档.md` §14.3 D18）。
+
+**构建与产物**：`dotnet build FFXIV-AutoBuyer\FFXIV-AutoBuyer.csproj -c Release` → **0 错误**（另有 2 条 `NU1900`：NuGet 漏洞数据源不可达的环境警告，与代码无关）；`AutoBuyer.dll` **152,064 B**（SHA256 `DC22871EC68C05DB467092E25D1FA800E13D772526AA514ED0D331EFEA2C9281`），落 `E:\Code\Work\.output\FFXIV-AutoBuyer\`；清单 `AssemblyVersion` = `1.1.6.0`。`OmenTools.dll` 同步重建（D18）。
+
+**版本号** 清单 `1.1.5` → **`1.1.6`**（功能调整：z 位递增）
+
+**测试**：见 `测试文档.md`（2026-11-05）；**实机回归为用户侧待办**。
 
 ---
 

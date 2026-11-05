@@ -347,16 +347,12 @@ public unsafe partial class MarketBoardModule
             return true;
         }
 
-        // 1) 达到目标数量 → 完成
+        // 1) 正在等待上一次购买生效：先结算它，再判断目标数量。
+        //    必须放在「达到目标 → 完成」之前：最后一次购买刚好达成目标时，
+        //    若先走完成分支，那条挂单既不会被本地隐藏，也不会从「最低价」里剔除，
+        //    卡片就会一直停在刚买走的价格上（实机反馈「买完以后最低价未变化」）。
         var heldCount = LocalPlayerState.GetItemCount(purchaseItemID);
 
-        if (heldCount >= purchaseTarget)
-        {
-            FinishPurchase(null);
-            return true;
-        }
-
-        // 2) 正在等待上一次购买生效
         if (purchaseWaitStart != 0)
         {
             var listingGone = !IsListingStillThere(info, purchaseWaitingListingID);
@@ -373,12 +369,17 @@ public unsafe partial class MarketBoardModule
                 // 仅本地移除已购挂单；数据只在「打开窗口 / 手动刷新」时获取。
                 provider.MarkListingPurchased(purchasedListingID);
 
+                // 已购挂单不再计入最低价：立即刷新卡片，改为下一个仍可购买的最低价
+                // （不能等下一次列表刷新——购买后游戏侧不会自动重搜，卡片会一直停在刚买走的价格）。
+                provider.RefreshCurrentWorldGameMinPriceAfterPurchase(purchaseItemID);
+
                 // 两次下单之间留出冷却时间，让游戏处理购买并更新列表
                 purchaseCooldownUntil = Environment.TickCount64 + PURCHASE_COOLDOWN_MS;
-                return false;
-            }
 
-            if (Environment.TickCount64 - purchaseWaitStart > PURCHASE_WAIT_MS)
+                // 不在这里 return：继续走下面的「达到目标 → 完成」，
+                // 这样达成目标时也能保留本轮的「隐藏挂单 + 刷新最低价」。
+            }
+            else if (Environment.TickCount64 - purchaseWaitStart > PURCHASE_WAIT_MS)
             {
                 var inventoryFull = IsUnableToReceiveItem(purchaseItemID);
 
@@ -389,23 +390,36 @@ public unsafe partial class MarketBoardModule
                         Lang.Get("BetterMarketBoard-Purchase-Timeout"),
                     inventoryFull
                 );
-            }
 
-            return !isPurchasing;
+                return !isPurchasing;
+            }
+            else
+                return false;
+        }
+
+        // 2) 达到目标数量 → 完成
+        if (heldCount >= purchaseTarget)
+        {
+            FinishPurchase(null);
+            return true;
         }
 
         // 冷却中：等游戏把上一次购买与列表更新处理完再继续
         if (Environment.TickCount64 < purchaseCooldownUntil)
             return false;
 
-        // 3) 确实收不下 → 立即停止（不发出版本注定失败的请求，玩家立刻看到提示）
+        // 4) 确实收不下 → 立即停止（不发出版本注定失败的请求，玩家立刻看到提示）
         if (IsUnableToReceiveItem(purchaseItemID))
         {
             FinishPurchase(Lang.Get("BetterMarketBoard-Purchase-Failed-InventoryFull"), inventoryFull: true);
             return true;
         }
 
-        // 4) 取当前服务器在售列表中价格最低的第一条（列表已按单价升序）
+        // 5) 每次购买行为都读一次当前最低价，更新「每服务器游戏内最低价」存储（第六十二轮）；
+        //    卡片据此显示真实服务器价，而不是靠自己去读挂单数据。
+        provider.RecordCurrentWorldGameMinPrice(purchaseItemID);
+
+        // 5.1) 取当前服务器在售列表中价格最低的第一条（列表已按单价升序）
         var firstListing = FindCheapestListing(info, purchaseItemID);
 
         if (firstListing == null)
@@ -414,7 +428,7 @@ public unsafe partial class MarketBoardModule
             return true;
         }
 
-        // 4.1) 水晶类专属满包判定：持有量 + 本单数量超过 9999 绝对上限 → 直接失败
+        // 5.2) 水晶类专属满包判定：持有量 + 本单数量超过 9999 绝对上限 → 直接失败
         //      （水晶背包单格上限 9999，超出后游戏必定拒绝，发出请求只是白等）
         if (IsCrystalCapacityExceeded(purchaseItemID, heldCount, firstListing.Value.Quantity))
         {

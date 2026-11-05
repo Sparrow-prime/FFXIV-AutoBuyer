@@ -25,6 +25,16 @@ public static class DLog
         IPluginLog.Instance().Debug(ex, ex.ToString());
 
 
+    public static void Info(string message) =>
+        IPluginLog.Instance().Info(message);
+
+    public static void Info(string message, Exception ex) =>
+        IPluginLog.Instance().Info(ex, message);
+
+    public static void Info(Exception ex) =>
+        IPluginLog.Instance().Info(ex, ex.ToString());
+
+
     public static void Warning(string message) =>
         IPluginLog.Instance().Warning(message);
 

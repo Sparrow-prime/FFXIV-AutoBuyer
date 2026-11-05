@@ -61,7 +61,7 @@ public sealed class Plugin : IDalamudPlugin
         var services = DService.InitializedServiceTypes;
         var skipped  = DService.SkippedServiceTypes;
 
-        DLog.Warning
+        DLog.Info
         (
             $"[AutoBuyer][自检] 已启用服务 {services.Count} 个（白名单）："
             + string.Join("、", services.Select(static x => x.Name))
@@ -70,7 +70,7 @@ public sealed class Plugin : IDalamudPlugin
                    "；白名单外无其它服务文件")
         );
 
-        DLog.Warning
+        DLog.Info
         (
             "[AutoBuyer][自检] 本方公共面：命令=/market；"
             + "IPC=FFXIVAutoBuyer.MarketBoard.{SearchItem,ToggleOverlay}；"

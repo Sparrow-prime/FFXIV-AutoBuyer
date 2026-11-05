@@ -10,7 +10,7 @@ namespace FFXIVAutoBuyer.MarketBoard;
 public unsafe partial class MarketBoardModule
 {
     /// <summary>
-    /// 取聚合行情中的 NQ / HQ 分档（跨世界价格卡片、卡片统计与均价计算共用）。
+    /// 取聚合行情中的 NQ / HQ 分档（跨世界价格卡片的服务器最低价回落使用）。
     /// </summary>
     private static UniversalisAggregatedMarketScope GetAggregatedMarketScope
     (

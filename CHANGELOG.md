@@ -19,7 +19,7 @@
 | 1.1.4 | 2026-10-02 | §1.1.4 | `8c016fd` ／ tag `1.1.4` |
 | 1.1.5 | 2026-11-05 | §1.1.5 | 本地中间版本，未推送（已并入 1.1.6） |
 | 1.1.6 | 2026-11-05 | §1.1.6 | `eaf5504` ／ tag `1.1.6` |
-| 1.1.7 | 2026-11-09 | §1.1.7 | 待补 |
+| 1.1.7 | 2026-11-09 | §1.1.7 | `6c2c5c6` ／ tag `1.1.7` |
 
 **版本归属的口径与限度（如实说明）**：第五轮之前的逐轮记录，原文（`测试文档.md` §四~§七、`设计文档.md` §十五~§十七）只注明日期、未注明所属版本，无法凭原文可靠判定每轮落在哪个 tag 内；本节按**日期先后**排入相邻版本，凡原文未明示者一律不臆断，均列在对应版本下并标注轮次与日期。第五轮及以后各轮的版本归属以原文为准。
 
@@ -1423,11 +1423,11 @@ if (data.Results.All(x => x.ItemID != itemID))
 
 **测试**：见 `测试文档.md` §〇（2026-11-09）；工程级构建 0 错误、依赖闭包 4 项、删除侧 / 保留侧符号核对与静态残留扫描通过；**实机日志核对为用户侧待办**（重载后应不再出现该行）。
 
-**提交** 待补
-**tag** 待补
-**Release** 待补
-**附件** 待补
-**推送方式** 待补
+**提交** `6c2c5c6` — *1.1.7: 删除零调用的 ContentReplyManager 签名，消除每次加载的 GetStaticAddress 失败日志*（7 文件：`CHANGELOG.md`、插件工程 1 个、内嵌库 3 个、`lib/FROZEN.md`；**+58 / −29**）
+**tag** `1.1.7`（annotated，指向 `6c2c5c6`）
+**Release** <https://github.com/Sparrow-prime/FFXIV-AutoBuyer/releases/tag/1.1.7>（标题 `1.1.7`；正文已线上核对：远端 body 的 SHA256 与本地一致、无乱码）
+**附件** `latest.zip` **401,720 B**（SHA256 `4160415B786B1524CBB0D10F953A120566738CC42A020E83DEBCE0AC4E58A2F7`；GitHub 侧资产 `digest=sha256:4160415b…a2f7` 与本地一致），内含 `AutoBuyer.dll`（152,064 B，SHA256 `906B6A21…EA76`）、`AutoBuyer.json`、`AutoBuyer.deps.json`、`Localization/zh-CN.json`、`OmenTools.dll`（665,088 B）、`DailyRoutines.Common.dll`、`TinyPinyin.dll`
+**推送方式**：SSH（`git@github.com:Sparrow-prime/FFXIV-AutoBuyer.git`；`-c core.sshCommand='C:/Windows/System32/OpenSSH/ssh.exe'` 绕过 git 自带 ssh 在受限环境下「无法创建命名管道」的问题）。Release 与附件走 `api.github.com` / `uploads.github.com`：本机走 schannel 的 HTTPS 全失败（`Connection was reset`），改用 Python urllib 直连；Token 取自 `E:\Code\Personal file\github_token.txt`，仅内联读取、输出未回显、未写入 `.git/config`、未落盘。
 
 ---
 

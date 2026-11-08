@@ -295,20 +295,6 @@ public unsafe partial class GameState : OmenServiceBase<GameState>
         LuminaGetter.GetRow<Map>(Map).GetValueOrDefault();
 
     /// <summary>
-    ///     当前区域服务器 ID
-    /// </summary>
-    public static uint ZoneServerID
-    {
-        get
-        {
-            var packet     = ContentReplyManagerPtr + ZoneServerIDOffset;
-            var serverID   = *(ushort*)packet;
-            var instanceID = *(ushort*)(packet + 4);
-            return ((uint)serverID << 16) | instanceID;
-        }
-    }
-
-    /// <summary>
     ///     当前 TerritoryType ID
     /// </summary>
     public static uint TerritoryType =>

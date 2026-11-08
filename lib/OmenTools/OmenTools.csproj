@@ -6,7 +6,7 @@
         <UseWindowsForms>true</UseWindowsForms>
         <ImplicitUsings>true</ImplicitUsings>
         <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
-        <BaseOutputPath>E:\Code\Work\.output\_lib\OmenTools\</BaseOutputPath>
+        <BaseOutputPath>E:\Code\Output\_lib\OmenTools\</BaseOutputPath>
         <SatelliteResourceLanguages>xxx</SatelliteResourceLanguages>
         <!-- 【AutoBuyer 本地改动】在 NoWarn 末尾追加 CS0618：屏蔽上游 OmenTools 中未被本插件使用的
              代码（AetheryteRecord / TeleportCostCalculator）引用的过时 API 警告，保持构建输出干净。 -->

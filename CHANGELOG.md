@@ -19,6 +19,7 @@
 | 1.1.4 | 2026-10-02 | §1.1.4 | `8c016fd` ／ tag `1.1.4` |
 | 1.1.5 | 2026-11-05 | §1.1.5 | 本地中间版本，未推送（已并入 1.1.6） |
 | 1.1.6 | 2026-11-05 | §1.1.6 | `eaf5504` ／ tag `1.1.6` |
+| 1.1.7 | 2026-11-09 | §1.1.7 | 待补 |
 
 **版本归属的口径与限度（如实说明）**：第五轮之前的逐轮记录，原文（`测试文档.md` §四~§七、`设计文档.md` §十五~§十七）只注明日期、未注明所属版本，无法凭原文可靠判定每轮落在哪个 tag 内；本节按**日期先后**排入相邻版本，凡原文未明示者一律不臆断，均列在对应版本下并标注轮次与日期。第五轮及以后各轮的版本归属以原文为准。
 
@@ -1376,6 +1377,57 @@ if (data.Results.All(x => x.ItemID != itemID))
 **Release** <https://github.com/Sparrow-prime/FFXIV-AutoBuyer/releases/tag/1.1.6>（标题 `1.1.6`，正文已线上核对无乱码）
 **附件** `latest.zip` **401,869 B**（SHA256 `F4B349DABF71E67833AE4003A97AA5D1EEE4B5EE96692D91648D8A8A5D40F2E6`；GitHub 侧资产 `digest=sha256:f4b349da…f2e6` 与本地一致），内含 `AutoBuyer.dll`（152,064 B，SHA256 `DC22871E…9281`）、`AutoBuyer.json`、`AutoBuyer.deps.json`、`Localization/zh-CN.json`、`OmenTools.dll`（666,112 B）、`DailyRoutines.Common.dll`、`TinyPinyin.dll`
 **推送方式**：HTTPS + Token（`E:\Code\Personal file\github_token.txt`，仅在 PowerShell / Python 内联读取、输出已脱敏；未写入 `.git/config`、未落盘、未回显）。本机 SSH（22 端口）沿用上轮结论仍被网络环境拦截，故走 HTTPS + OpenSSL。
+
+---
+
+## 1.1.7（2026-11-09）
+
+### 第六十三轮：删除零调用的 `ContentReplyManager` 签名（2026-11-09）
+
+**现象**（用户实机日志，2026-11-09 02:54）：
+
+```
+错误 | [AutoBuyer] 尝试 GetStaticAddress 时失败, 签名: 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 45 33 C0 48 8D 57 ?? 41 8B CE E8 ?? ?? ?? ?? 48 8D 8F
+	System.Collections.Generic.KeyNotFoundException: Can't find a signature of 48 8D 0D ?? ?? ?? ?? E8 …
+	   at Dalamud.Game.SigScanner.Scan(IntPtr baseAddress, Int32 size, String signature)
+	   at Dalamud.Game.SigScanner.ScanText(String signature)
+	   at Dalamud.Game.SigScanner.GetStaticAddressFromSig(String signature, Int32 offset)
+	   at OmenTools.Interop.Game.Models.CompSig.GetStatic(Int32 offset)
+```
+
+**根因**：
+
+| # | 事实 | 依据 |
+| ---- | ---- | ---- |
+| 1 | 该签名是内嵌 OmenTools 冻结副本里的 `ContentReplyManagerSig`（2026-10-01 快照） | `lib/OmenTools/OmenService/Implementations/Infos/GameState.Internal.cs` |
+| 2 | 它只服务 `GameState.ZoneServerID`（当前区域服务器 ID），而该属性在本插件与 `DailyRoutines.Common` 中**零调用** | 全仓搜 `ZoneServerID` 只有定义与两个签名字段 |
+| 3 | 两个签名是 `static readonly`，`GameState` 类型初始化即扫描 → 客户端更新后该字节模式不存在，**每次加载必失败一次** | 报错发生在加载阶段、只此一条 |
+| 4 | `CompSig.GetStatic` 内部 catch `KeyNotFoundException` 后返回 `nint.Zero` → **不是崩溃、不影响报价 / 排行 / 购买任何链路**，属纯日志噪声 | `lib/OmenTools/Interop/Game/Models/CompSig.cs` |
+| 5 | 同时是个隐患：`ZoneServerID` 一旦被误用，会读 `0 + offset` 处的内存 | 同上 |
+
+**处置**（删死代码，最小改动）：
+
+| # | 措施 | 位置 |
+| ---- | ---- | ---- |
+| 1 | 删除 `ContentReplyManagerSig`、`ZoneServerIDOffsetSig` 两个 `CompSig` 字段 | `GameState.Internal.cs` |
+| 2 | 删除 `GameState.ZoneServerID` 属性 | `GameState.cs` |
+| 3 | 登记为 `lib/FROZEN.md` D19 与 `设计文档.md` §14.3 D19 | 文档 |
+
+**未做（有意）**：**不修签名**。修好后也没有消费者；且库内其余 6 条签名仍全部匹配，说明客户端没有整批漂移，单独为一条无人使用的签名维护它就是纯成本。将来真需要 `ZoneServerID` 时，再按「读客户端重新定位」或「取上游 OmenTools 新签名」处理。
+
+**验证**：`OmenTools.dll` 里 `ZoneServerID` / `ContentReplyManager` / `ContentReplyManagerPtr` 在元数据与字符串中均已消失；`GameState` 类型、`FateDirectorSetupSig`、`DService` 的「服务白名单」仍在；其余 6 条 `CompSig` 字面量（`LocalPlayerState` ×3、`FateDirectorSetup`、`PlayerController`、`PlayerMoveWalk`）在 `#US` 堆（奇偶两种对齐）中全部仍在 → 纯删除、无连带。全库（`*.cs` / `*.csproj`）搜 `ZoneServerID|ContentReplyManager` = 0 命中。
+
+**构建与产物**：`dotnet build FFXIV-AutoBuyer\FFXIV-AutoBuyer.csproj -c Release -m:1 -nodeReuse:false` → **0 错误**（另有 2 条 `NU1900`：NuGet 漏洞数据源不可达的环境警告，与代码无关）；`AutoBuyer.dll` **152,064 B**（SHA256 `906B6A21D4DC6BC53D9A2DD363EFB09921864CC72437716A85DEC53C4748EA76`），落 `E:\Code\Output\FFXIV-AutoBuyer\`；`OmenTools.dll` **665,088 B**（较 1.1.6 的 666,112 B **−1,024 B**，SHA256 `A02397B3D17A38BAD575D8E14E1957ACF7CBBDD539684A27496927C705BC4FAC`）；清单 `AssemblyVersion` = `1.1.7.0`。
+
+**版本号** 清单 `1.1.6` → **`1.1.7`**（修复：z 位递增）
+
+**测试**：见 `测试文档.md` §〇（2026-11-09）；工程级构建 0 错误、依赖闭包 4 项、删除侧 / 保留侧符号核对与静态残留扫描通过；**实机日志核对为用户侧待办**（重载后应不再出现该行）。
+
+**提交** 待补
+**tag** 待补
+**Release** 待补
+**附件** 待补
+**推送方式** 待补
 
 ---
 

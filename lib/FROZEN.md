@@ -58,6 +58,7 @@ Interop 帮助类 / ImGui 控件（`Combos`、`MapRenderer`、`DatePicker`）与
 | D16 | `NotifyHelper` 删除 `#region TTS`（只转发 EdgeTTSIPC，本插件不用，第五十六轮） |
 | D17 | 插件侧删除 16 条未使用的 `global using I* = …` 别名（第五十六轮） |
 | D18 | `DLog` 补充 `Info` 级别（插件日志分级：普通工作 Info / 异常 Warning / 诊断 Debug，第六十二轮） |
+| D19 | `GameState.Internal.cs` / `GameState.cs`：删除死代码 `ContentReplyManagerSig`、`ZoneServerIDOffsetSig` 与 `GameState.ZoneServerID` 属性（第六十三轮） |
 
 > **依赖闭包现状**：运行时只需 `AutoBuyer` + `OmenTools` + `DailyRoutines.Common` + `TinyPinyin` 四个程序集；
 > 部署目录合计约 **900 KB**（1.1.2 时约 2.26 MB）。

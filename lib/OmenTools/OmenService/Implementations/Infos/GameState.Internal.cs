@@ -12,16 +12,6 @@ namespace OmenTools.OmenService;
 
 public unsafe partial class GameState
 {
-    private static readonly CompSig ContentReplyManagerSig =
-        new("48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 45 33 C0 48 8D 57 ?? 41 8B CE E8 ?? ?? ?? ?? 48 8D 8F");
-    private static readonly CompSig ZoneServerIDOffsetSig =
-        new
-        (
-            "0F 11 83 ?? ?? ?? ?? 0F 10 4F ?? 0F 11 8B ?? ?? ?? ?? 0F 10 47 ?? 0F 11 83 ?? ?? ?? ?? 0F 10 4F ?? 0F 11 8B ?? ?? ?? ?? 0F 10 47 ?? 0F 11 83 ?? ?? ?? ?? 0F 10 4F ?? 0F 11 8B ?? ?? ?? ?? 0F 10 47 ?? 0F 11 83 ?? ?? ?? ?? 0F 10 4F"
-        );
-    private static readonly nint ContentReplyManagerPtr = ContentReplyManagerSig.GetStatic();
-    private static readonly nint ZoneServerIDOffset     = ZoneServerIDOffsetSig.GetStatic();
-
     private static readonly CompSig                          FateDirectorSetupSig = new("E8 ?? ?? ?? ?? 48 39 37");
     private delegate        nint                             FateDirectorSetupDelegate(uint rowID, nint a2, nint a3);
     private                 Hook<FateDirectorSetupDelegate>? FateDirectorSetupHook;
